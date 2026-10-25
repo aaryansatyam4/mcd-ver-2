@@ -14,6 +14,14 @@ services:
         value: "true"
       - key: YOLO_AUTOSTART
         value: "false"
+      # Reach the YOLO26 service over Render's private network (host:port, http:// is added by the backend)
+      - key: YOLO_URL
+        fromService:
+          type: web
+          name: wheelwash-yolo
+          property: hostport
+      - key: YOLO_TIMEOUT_MS
+        value: "8000"
       - key: TIMEZONE
         value: Asia/Kolkata
       - key: CORS_ORIGIN
@@ -22,3 +30,12 @@ services:
         generateValue: true
       - key: JWT_EXPIRES_IN
         value: 24h
+
+  # YOLO26 truck-vs-human detector. PyTorch does not fit the free plan, so this needs a paid instance.
+  - type: web
+    name: wheelwash-yolo
+    runtime: docker
+    dockerfilePath: ./backend/yolo/Dockerfile
+    dockerContext: ./backend/yolo
+    healthCheckPath: /health
+    plan: starter
