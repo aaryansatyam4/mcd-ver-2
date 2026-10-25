@@ -1,6 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Camera, Bluetooth, Video, Play, Square, RefreshCw, X, Radio, CheckCircle, Smartphone } from 'lucide-react';
+import { Camera, Bluetooth, Video, Play, Square, RefreshCw, X, Radio, CheckCircle, Smartphone, Cpu } from 'lucide-react';
 import { useSocket } from '../contexts/SocketContext.js';
+import { loadYoloModel, type AiBackend, type YoloModel, type YoloResult } from '../ai/yoloBrowser.js';
+
+type AiState =
+  | { status: 'idle' }
+  | { status: 'loading'; progress: number | null }
+  | { status: 'ready'; backend: AiBackend; inferenceMs: number | null }
+  | { status: 'unavailable' };
 
 interface DeviceCameraConnectorProps {
   isOpen: boolean;
@@ -21,12 +28,18 @@ export const DeviceCameraConnector: React.FC<DeviceCameraConnectorProps> = ({
   const [isStreaming, setIsStreaming] = useState<boolean>(false);
   const [streamError, setStreamError] = useState<string | null>(null);
   const [fpsCount, setFpsCount] = useState<number>(0);
+  const [aiState, setAiState] = useState<AiState>({ status: 'idle' });
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const streamIntervalRef = useRef<any>(null);
   const isStreamingRef = useRef<boolean>(false);
+  const modelRef = useRef<YoloModel | null>(null);
+  const inferenceBusyRef = useRef<boolean>(false);
+  // Newest on-device result not yet sent; each result rides along with exactly one frame
+  const pendingDetectionsRef = useRef<YoloResult | null>(null);
+  const lastInferenceUiUpdateRef = useRef<number>(0);
 
   // Enumerate cameras (webcams, USB cams, Bluetooth cams, phone/continuity cams)
   const enumerateCameras = async () => {
@@ -86,9 +99,12 @@ export const DeviceCameraConnector: React.FC<DeviceCameraConnectorProps> = ({
 
       setIsStreaming(true);
       isStreamingRef.current = true;
+      loadOnDeviceAi();
 
       // Canvas frame pump to backend via WebSockets.
-      // Truck vs human classification is done server-side by YOLO26 on the raw frame.
+      // YOLO26 runs on this device; its raw detections ride along with the frames and the
+      // backend decides what counts (truck vs human, ROI, passage). Frames sent before the model
+      // is ready (or on devices that cannot run it) fall back to server-side detection.
       const fps = 6;
       let framesSent = 0;
       const intervalMs = Math.round(1000 / fps);
@@ -105,10 +121,15 @@ export const DeviceCameraConnector: React.FC<DeviceCameraConnectorProps> = ({
           canvas.height = 360;
           ctx.drawImage(video, 0, 0, 640, 360);
 
+          const detections = pendingDetectionsRef.current;
+          pendingDetectionsRef.current = null;
           socket.emit('camera:ingest_frame', {
             locationId,
             frameBase64: canvas.toDataURL('image/jpeg', 0.7),
+            ...(detections ? { detections } : {}),
           });
+
+          runDetection(canvas);
 
           framesSent++;
           setFpsCount(framesSent);
@@ -118,6 +139,49 @@ export const DeviceCameraConnector: React.FC<DeviceCameraConnectorProps> = ({
       setStreamError(err.message || 'Failed to start camera device.');
       setIsStreaming(false);
     }
+  };
+
+  // Download (first time) or load from cache the YOLO26 model; streaming continues meanwhile
+  const loadOnDeviceAi = () => {
+    if (modelRef.current) {
+      setAiState({ status: 'ready', backend: modelRef.current.backend, inferenceMs: null });
+      return;
+    }
+    setAiState({ status: 'loading', progress: null });
+    loadYoloModel((progress) => {
+      if (isStreamingRef.current) setAiState({ status: 'loading', progress });
+    })
+      .then((model) => {
+        modelRef.current = model;
+        if (isStreamingRef.current) setAiState({ status: 'ready', backend: model.backend, inferenceMs: null });
+      })
+      .catch((err) => {
+        console.warn('On-device AI unavailable, falling back to server-side detection:', err);
+        if (isStreamingRef.current) setAiState({ status: 'unavailable' });
+      });
+  };
+
+  // At most one inference in flight; the frame is copied synchronously so the canvas can be redrawn
+  const runDetection = (canvas: HTMLCanvasElement) => {
+    const model = modelRef.current;
+    if (!model || inferenceBusyRef.current) return;
+
+    inferenceBusyRef.current = true;
+    model
+      .detect(canvas)
+      .then((result) => {
+        if (!isStreamingRef.current) return;
+        pendingDetectionsRef.current = result;
+        const now = Date.now();
+        if (now - lastInferenceUiUpdateRef.current > 1000) {
+          lastInferenceUiUpdateRef.current = now;
+          setAiState({ status: 'ready', backend: model.backend, inferenceMs: result.inference_ms });
+        }
+      })
+      .catch((err) => console.warn('On-device detection failed:', err))
+      .finally(() => {
+        inferenceBusyRef.current = false;
+      });
   };
 
   const stopStreaming = () => {
@@ -140,8 +204,10 @@ export const DeviceCameraConnector: React.FC<DeviceCameraConnectorProps> = ({
     }
 
     isStreamingRef.current = false;
+    pendingDetectionsRef.current = null;
     setIsStreaming(false);
     setFpsCount(0);
+    setAiState({ status: 'idle' });
   };
 
   if (!isOpen) return null;
@@ -244,6 +310,40 @@ export const DeviceCameraConnector: React.FC<DeviceCameraConnectorProps> = ({
             )}
           </div>
 
+          {/* On-device AI status */}
+          {aiState.status === 'loading' && (
+            <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-700">
+              <div className="flex items-center justify-between font-semibold mb-1.5">
+                <span className="flex items-center gap-1.5">
+                  <Cpu className="w-4 h-4 text-blue-600" />
+                  Loading AI model…
+                </span>
+                {aiState.progress !== null && <span className="font-mono">{Math.round(aiState.progress * 100)}%</span>}
+              </div>
+              <div className="h-1.5 rounded-full bg-slate-200 overflow-hidden">
+                <div
+                  className={`h-full bg-blue-600 transition-all ${aiState.progress === null ? 'w-1/3 animate-pulse' : ''}`}
+                  style={aiState.progress !== null ? { width: `${Math.round(aiState.progress * 100)}%` } : undefined}
+                />
+              </div>
+              <p className="text-[11px] text-slate-500 mt-1.5">One-time download; next time it loads instantly from this device.</p>
+            </div>
+          )}
+          {aiState.status === 'ready' && (
+            <div className="px-3 py-2 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 flex items-center justify-between">
+              <span className="flex items-center gap-1.5 font-semibold">
+                <Cpu className="w-4 h-4" />
+                On-device AI active ({aiState.backend === 'webgpu' ? 'GPU' : 'CPU'})
+              </span>
+              {aiState.inferenceMs !== null && <span className="font-mono">{Math.round(aiState.inferenceMs)} ms / frame</span>}
+            </div>
+          )}
+          {aiState.status === 'unavailable' && (
+            <div className="px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-800">
+              AI is unavailable on this device. The stream continues and counting uses the server detector if one is running.
+            </div>
+          )}
+
           {/* Hidden Canvas for Frame Processing */}
           <canvas ref={canvasRef} className="hidden" />
 
@@ -253,7 +353,7 @@ export const DeviceCameraConnector: React.FC<DeviceCameraConnectorProps> = ({
               <CheckCircle className="w-4 h-4 text-blue-600" />
               Live Control Room Synchronization
             </div>
-            As soon as you start streaming, Master Admin and all monitoring dashboards will see your live camera view in <strong className="font-semibold">{locationName}</strong> automatically, and the YOLO26 AI detector will count passing trucks. People and workers are never counted.
+            As soon as you start streaming, Master Admin and all monitoring dashboards will see your live camera view in <strong className="font-semibold">{locationName}</strong> automatically, and the YOLO26 AI running on this device will count passing trucks. People and workers are never counted.
           </div>
 
           {/* Buttons */}

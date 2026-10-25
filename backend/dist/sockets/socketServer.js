@@ -7,9 +7,53 @@ let io = null;
 let onDeviceFrameHandler = null;
 let onDeviceDisconnectHandler = null;
 const FRAME_DATA_URL = /^data:image\/(jpeg|png|webp);base64,/;
+const MAX_DEVICE_DETECTIONS = 300;
 export function registerDeviceCameraHandlers(onFrame, onDisconnect) {
     onDeviceFrameHandler = onFrame;
     onDeviceDisconnectHandler = onDisconnect;
+}
+const isFiniteNumber = (v) => typeof v === 'number' && Number.isFinite(v);
+/**
+ * Validate YOLO26 detections produced on the streaming device (onnxruntime-web in the browser).
+ * Returns null for anything malformed so the frame falls back to server-side detection.
+ */
+export function parseDeviceDetections(raw) {
+    if (!raw || typeof raw !== 'object')
+        return null;
+    const r = raw;
+    if (!isFiniteNumber(r.width) || !isFiniteNumber(r.height) || r.width <= 0 || r.height <= 0)
+        return null;
+    if (!Array.isArray(r.detections) || r.detections.length > MAX_DEVICE_DETECTIONS)
+        return null;
+    const detections = [];
+    for (const item of r.detections) {
+        if (!item || typeof item !== 'object')
+            return null;
+        const d = item;
+        const bbox = d.bbox;
+        if (typeof d.class_name !== 'string' ||
+            !isFiniteNumber(d.class_id) ||
+            !isFiniteNumber(d.confidence) ||
+            d.confidence < 0 ||
+            d.confidence > 1 ||
+            !Array.isArray(bbox) ||
+            bbox.length !== 4 ||
+            !bbox.every(isFiniteNumber)) {
+            return null;
+        }
+        detections.push({
+            class_id: d.class_id,
+            class_name: d.class_name.slice(0, 32),
+            confidence: d.confidence,
+            bbox: [bbox[0], bbox[1], bbox[2], bbox[3]],
+        });
+    }
+    return {
+        detections,
+        inference_ms: isFiniteNumber(r.inference_ms) ? r.inference_ms : 0,
+        width: r.width,
+        height: r.height,
+    };
 }
 /**
  * Only an active Master Admin, or the Operator assigned to that location, may stream a
@@ -50,7 +94,8 @@ export function initSocketServer(httpServer, corsOrigin) {
         const user = socket.user;
         logger.info(`Socket client connected: ${socket.id} (${user ? user.username : 'anonymous'})`);
         // Receive live frame uploaded from a browser device camera (USB / Bluetooth / Webcam / Mobile).
-        // Only the raw image is used; classification happens server-side (YOLO26).
+        // The device runs YOLO26 itself and attaches its raw detections; the server still decides what counts.
+        // Frames without (valid) detections fall back to the server-side YOLO26 sidecar.
         let lastRejectNoticeAt = 0;
         socket.on('camera:ingest_frame', (data) => {
             if (!data || typeof data.frameBase64 !== 'string' || !FRAME_DATA_URL.test(data.frameBase64))
@@ -70,7 +115,8 @@ export function initSocketServer(httpServer, corsOrigin) {
                 }
                 return;
             }
-            onDeviceFrameHandler?.(locationId, data.frameBase64);
+            const detections = data.detections === undefined ? null : parseDeviceDetections(data.detections);
+            onDeviceFrameHandler?.(locationId, data.frameBase64, detections ?? undefined);
         });
         socket.on('camera:disconnect_device', (data) => {
             const locationId = Number(data?.locationId);
