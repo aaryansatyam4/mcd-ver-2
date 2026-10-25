@@ -1,6 +1,10 @@
 import { config } from '../config/index.js';
 import { logger } from '../utils/logger.js';
 let lastFailureLoggedAt = 0;
+let onUnavailableCallback = null;
+export function setYoloUnavailableCallback(cb) {
+    onUnavailableCallback = cb;
+}
 /**
  * Health-check the YOLO26 sidecar.
  */
@@ -33,9 +37,15 @@ export async function detectObjects(imageBase64) {
     catch (err) {
         // Throttle the warning so a down sidecar doesn't flood the logs at 6 fps x 3 cameras
         const now = Date.now();
-        if (now - lastFailureLoggedAt > 30000) {
+        if (now - lastFailureLoggedAt > 15000) {
             lastFailureLoggedAt = now;
             logger.warn(`YOLO detection unavailable at ${config.yoloUrl} (${err.message}). Automatic counting paused for live cameras.`);
+            try {
+                onUnavailableCallback?.();
+            }
+            catch {
+                // ignore
+            }
         }
         return null;
     }

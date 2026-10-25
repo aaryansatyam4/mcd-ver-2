@@ -16,6 +16,11 @@ export interface YoloResult {
 }
 
 let lastFailureLoggedAt = 0;
+let onUnavailableCallback: (() => void) | null = null;
+
+export function setYoloUnavailableCallback(cb: () => void): void {
+  onUnavailableCallback = cb;
+}
 
 /**
  * Health-check the YOLO26 sidecar.
@@ -48,11 +53,16 @@ export async function detectObjects(imageBase64: string): Promise<YoloResult | n
   } catch (err) {
     // Throttle the warning so a down sidecar doesn't flood the logs at 6 fps x 3 cameras
     const now = Date.now();
-    if (now - lastFailureLoggedAt > 30000) {
+    if (now - lastFailureLoggedAt > 15000) {
       lastFailureLoggedAt = now;
       logger.warn(
         `YOLO detection unavailable at ${config.yoloUrl} (${(err as Error).message}). Automatic counting paused for live cameras.`
       );
+      try {
+        onUnavailableCallback?.();
+      } catch {
+        // ignore
+      }
     }
     return null;
   }
