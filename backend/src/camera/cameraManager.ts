@@ -3,7 +3,7 @@ import { logger } from '../utils/logger.js';
 import { getKolkataTimestamp, getKolkataDateString } from '../utils/dateUtils.js';
 import { MotionDetector } from '../detection/motionDetector.js';
 import { analyzeDetections } from '../detection/sceneClassifier.js';
-import { detectObjects } from '../services/yoloDetector.js';
+import { detectObjects, type YoloResult } from '../services/yoloDetector.js';
 import { config as appConfig } from '../config/index.js';
 import { SyntheticStreamer } from './syntheticStreamer.js';
 import { FFmpegStreamer } from './ffmpegStreamer.js';
@@ -21,6 +21,8 @@ import type { AiStatus, DetectedObject } from './types.js';
 // A live source (device / RTSP) is considered active while frames keep arriving within this window
 const LIVE_SOURCE_TIMEOUT_MS = 3000;
 const RTSP_SOURCE_TIMEOUT_MS = 5000;
+// While a device keeps sending its own (on-device) detections, its other frames skip the server sidecar
+const DEVICE_AI_TIMEOUT_MS = 3000;
 
 interface CameraPipeline {
   camera: Camera;
@@ -34,6 +36,7 @@ interface CameraPipeline {
   lastDeviceFrameTime: number;
   lastRtspFrameTime: number;
   detectionInFlight: boolean;
+  lastDeviceDetectionsTime: number;
   aiStatus: AiStatus;
   lastObjects: DetectedObject[];
 }
@@ -54,7 +57,7 @@ export class CameraManager {
 
     // Register handlers to receive real-time device camera frames (Webcam / USB / Bluetooth)
     registerDeviceCameraHandlers(
-      (locationId, frameBase64) => this.handleDeviceFrame(locationId, frameBase64),
+      (locationId, frameBase64, detections) => this.handleDeviceFrame(locationId, frameBase64, detections),
       (locationId) => this.handleDeviceDisconnect(locationId)
     );
   }
@@ -103,6 +106,7 @@ export class CameraManager {
       lastDeviceFrameTime: 0,
       lastRtspFrameTime: 0,
       detectionInFlight: false,
+      lastDeviceDetectionsTime: 0,
       aiStatus: 'simulated',
       lastObjects: [],
     };
@@ -228,9 +232,10 @@ export class CameraManager {
 
   /**
    * Handle incoming device camera frame from browser webcam / USB / Bluetooth camera.
-   * Any client-side "metrics" are deliberately ignored: classification is done server-side by YOLO26.
+   * `detections` are the raw YOLO26 boxes the device computed itself (onnxruntime-web); the server
+   * still applies the ROI, thresholds and passage state machine. Without them, YOLO26 runs server-side.
    */
-  public handleDeviceFrame(locationId: number, frameBase64: string): void {
+  public handleDeviceFrame(locationId: number, frameBase64: string, detections?: YoloResult): void {
     const pipeline = this.pipelines.get(locationId);
     if (!pipeline) return;
 
@@ -238,9 +243,25 @@ export class CameraManager {
       // Switching from virtual/RTSP feed: start the passage state machine from a clean slate
       pipeline.detector.reset();
       pipeline.lastObjects = [];
+      pipeline.lastDeviceDetectionsTime = 0;
     }
     pipeline.activeSource = 'device';
     pipeline.lastDeviceFrameTime = Date.now();
+
+    if (detections) {
+      pipeline.lastDeviceDetectionsTime = Date.now();
+      if (pipeline.camera.detection_enabled === 1) {
+        this.applyDetections(pipeline, detections);
+      }
+      this.broadcastLiveFrame(pipeline, frameBase64, 'device');
+      return;
+    }
+
+    // The device is running YOLO26 itself; this frame simply arrived between two of its results
+    if (Date.now() - pipeline.lastDeviceDetectionsTime < DEVICE_AI_TIMEOUT_MS) {
+      this.broadcastLiveFrame(pipeline, frameBase64, 'device');
+      return;
+    }
 
     this.handleLiveFrame(pipeline, frameBase64, 'device');
   }
@@ -277,6 +298,14 @@ export class CameraManager {
       return;
     }
 
+    this.applyDetections(pipeline, result);
+  }
+
+  /**
+   * Feed one set of YOLO26 detections (from the server sidecar or from the device) into the
+   * Truck vs Human scene classifier and the passage state machine.
+   */
+  private applyDetections(pipeline: CameraPipeline, result: YoloResult): void {
     const scene = analyzeDetections(result, pipeline.detector.getConfig().roi, {
       vehicleClasses: appConfig.yoloVehicleClasses,
       truckMinConfidence: appConfig.yoloTruckMinConfidence,

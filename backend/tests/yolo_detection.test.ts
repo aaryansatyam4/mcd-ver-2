@@ -13,7 +13,8 @@ import { MotionDetector } from '../src/detection/motionDetector.js';
 import { CameraManager } from '../src/camera/cameraManager.js';
 import { CountService } from '../src/services/countService.js';
 import { db } from '../src/database/excelDb.js';
-import { canIngestCamera } from '../src/sockets/socketServer.js';
+import { canIngestCamera, parseDeviceDetections } from '../src/sockets/socketServer.js';
+import { detectObjects } from '../src/services/yoloDetector.js';
 
 const ROI = { x: 20, y: 35, width: 60, height: 45 }; // 128..512 x 126..288 on a 640x360 frame
 const OPTS = { vehicleClasses: ['truck', 'bus'], truckMinConfidence: 0.45, personMinConfidence: 0.35 };
@@ -207,6 +208,48 @@ describe('CameraManager live camera pipeline (YOLO26)', () => {
     }
     expect(CountService.getLocationCount(2).total).toBe(before);
     manager.setDetectionEnabled(cam.id, true);
+  });
+
+  // The phone ran YOLO26 itself (onnxruntime-web) and attached the boxes to the frame
+  const pushDeviceDetections = async (result: YoloResult) => {
+    manager.handleDeviceFrame(2, FRAME, result);
+    await sleep(60);
+  };
+
+  it('counts a truck from on-device detections without calling the server detector', async () => {
+    const before = CountService.getLocationCount(2).total;
+    vi.mocked(detectObjects).mockClear();
+    for (let i = 0; i < 6; i++) {
+      await pushDeviceDetections(scene(truck([100, 110, 560, 330]), person([530, 150, 560, 290])));
+      // preview frames in between two device results must not fall back to the sidecar
+      manager.handleDeviceFrame(2, FRAME);
+    }
+    expect(detectObjects).not.toHaveBeenCalled();
+    expect(manager.getPipeline(2)!.aiStatus).toBe('online');
+    expect(CountService.getLocationCount(2).total).toBe(before + 1);
+  });
+
+  it('never counts people reported by on-device detection', async () => {
+    const before = CountService.getLocationCount(2).total;
+    for (let i = 0; i < 10; i++) {
+      await pushDeviceDetections(scene(person([40, 0, 620, 360], 0.95)));
+    }
+    expect(manager.getPipeline(2)!.detector.getClassification()).toBe('HUMAN_IGNORED');
+    expect(CountService.getLocationCount(2).total).toBe(before);
+  });
+
+  it('accepts well-formed device detections and rejects malformed ones', () => {
+    const ok = scene(truck([100, 110, 560, 330]));
+    expect(parseDeviceDetections(ok)).toEqual(ok);
+    expect(parseDeviceDetections(null)).toBeNull();
+    expect(parseDeviceDetections({ ...ok, width: 0 })).toBeNull();
+    expect(parseDeviceDetections({ ...ok, detections: 'truck' })).toBeNull();
+    expect(parseDeviceDetections(scene({ ...truck([1, 2, 3, 4]), confidence: 7 }))).toBeNull();
+    expect(parseDeviceDetections(scene({ ...truck([1, 2, 3, 4]), bbox: [1, 2, 3] as any }))).toBeNull();
+    expect(parseDeviceDetections(scene({ ...truck([1, 2, NaN, 4]) }))).toBeNull();
+    expect(
+      parseDeviceDetections({ ...ok, detections: Array.from({ length: 301 }, () => truck([1, 2, 3, 4])) })
+    ).toBeNull();
   });
 
   it('only admins and the assigned operator may stream a camera into a location', () => {
