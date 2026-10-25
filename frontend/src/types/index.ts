@@ -92,4 +92,22 @@ export interface StreamFrame {
   stage: 'IDLE' | 'ENTERED_ZONE' | 'IN_PASSAGE' | 'COOLDOWN';
   classification?: 'NONE' | 'HUMAN_IGNORED' | 'TRUCK_VERIFIED';
   confidence?: number;
+  source?: 'synthetic' | 'device' | 'rtsp';
+  aiStatus?: 'simulated' | 'online' | 'offline';
+  objects?: DetectedObject[];
+  roi?: PercentBox;
+}
+
+export interface PercentBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface DetectedObject {
+  label: 'truck' | 'person';
+  confidence: number;
+  box: PercentBox;
+  inRoi: boolean;
 }

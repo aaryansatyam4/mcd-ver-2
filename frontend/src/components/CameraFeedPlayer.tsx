@@ -27,6 +27,8 @@ export const CameraFeedPlayer: React.FC<CameraFeedPlayerProps> = ({
 
   const isTruckVerified = frame?.classification === 'TRUCK_VERIFIED' || frame?.stage === 'IN_PASSAGE';
   const isHumanIgnored = frame?.classification === 'HUMAN_IGNORED';
+  const isLiveSource = frame?.source === 'device' || frame?.source === 'rtsp';
+  const isAiOffline = isLiveSource && detectionActive && frame?.aiStatus === 'offline';
 
   return (
     <div
@@ -88,12 +90,64 @@ export const CameraFeedPlayer: React.FC<CameraFeedPlayerProps> = ({
             <span className="w-2 h-2 rounded-full bg-red-500 animate-ping" />
             LIVE REC
           </div>
-          {frame && (
+          {frame && !isLiveSource && (
             <div className="px-2 py-0.5 rounded bg-black/75 backdrop-blur-sm text-[10px] font-mono text-emerald-400 border border-white/10">
               MOTION: {frame.motionScore}%
             </div>
           )}
+          {isLiveSource && frame?.aiStatus === 'online' && (
+            <div className="px-2 py-0.5 rounded bg-black/75 backdrop-blur-sm text-[10px] font-mono text-emerald-400 border border-white/10">
+              YOLO26 AI ACTIVE
+            </div>
+          )}
         </div>
+
+        {/* Live camera: wheel-wash ROI and AI detections (virtual feed draws its own) */}
+        {isLiveSource && frame?.roi && (
+          <div
+            className="absolute border-2 border-dashed border-sky-400/80 rounded pointer-events-none"
+            style={{
+              left: `${frame.roi.x}%`,
+              top: `${frame.roi.y}%`,
+              width: `${frame.roi.width}%`,
+              height: `${frame.roi.height}%`,
+            }}
+          />
+        )}
+        {isLiveSource &&
+          frame?.objects?.map((obj, i) => (
+            <div
+              key={i}
+              className={`absolute border-2 rounded-sm pointer-events-none ${
+                obj.label === 'truck'
+                  ? obj.inRoi
+                    ? 'border-emerald-400'
+                    : 'border-emerald-400/40'
+                  : 'border-amber-400'
+              }`}
+              style={{
+                left: `${obj.box.x}%`,
+                top: `${obj.box.y}%`,
+                width: `${obj.box.width}%`,
+                height: `${obj.box.height}%`,
+              }}
+            >
+              <span
+                className={`absolute -top-4 left-0 px-1 text-[9px] font-mono font-bold text-white whitespace-nowrap ${
+                  obj.label === 'truck' ? 'bg-emerald-600' : 'bg-amber-500'
+                }`}
+              >
+                {obj.label === 'truck' ? 'TRUCK' : 'PERSON (IGNORED)'} {obj.confidence}%
+              </span>
+            </div>
+          ))}
+
+        {isAiOffline && (
+          <div className="absolute bottom-3 left-3 right-3 bg-rose-600/95 text-white text-xs font-bold px-3 py-1.5 rounded shadow-lg flex items-center justify-center gap-1.5 pointer-events-none">
+            <AlertCircle className="w-4 h-4" />
+            <span>AI DETECTOR OFFLINE — AUTOMATIC COUNTING PAUSED</span>
+          </div>
+        )}
 
         {/* Dynamic AI Classification Overlay */}
         {isTruckVerified && (
@@ -105,7 +159,7 @@ export const CameraFeedPlayer: React.FC<CameraFeedPlayerProps> = ({
           </div>
         )}
 
-        {isHumanIgnored && (
+        {isHumanIgnored && !isAiOffline && (
           <div className="absolute bottom-3 left-3 right-3 bg-amber-500/95 text-white text-xs font-bold px-3 py-1.5 rounded shadow-lg flex items-center justify-center gap-1.5 pointer-events-none">
             <UserX className="w-4 h-4" />
             <span>PEDESTRIAN / WORKER DETECTED (FILTERED — NO COUNT)</span>

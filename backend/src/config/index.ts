@@ -16,4 +16,16 @@ export const config = {
   demoMode: process.env.DEMO_MODE !== 'false',
   timezone: process.env.TIMEZONE || 'Asia/Kolkata',
   ffmpegPath: process.env.FFMPEG_PATH || 'ffmpeg',
+  // YOLO26 sidecar (backend/yolo/detect_server.py). All real camera frames are classified here.
+  yoloUrl: (process.env.YOLO_URL || 'http://127.0.0.1:5002').replace(/\/+$/, ''),
+  yoloPython: process.env.YOLO_PYTHON || 'python3',
+  yoloAutoStart: process.env.YOLO_AUTOSTART !== 'false',
+  yoloTimeoutMs: parseInt(process.env.YOLO_TIMEOUT_MS || '4000', 10),
+  // COCO class names that count as a truck passage (YOLO sometimes labels large tippers as "bus")
+  yoloVehicleClasses: (process.env.YOLO_VEHICLE_CLASSES || 'truck,bus')
+    .split(',')
+    .map((c) => c.trim().toLowerCase())
+    .filter(Boolean),
+  yoloTruckMinConfidence: parseFloat(process.env.YOLO_TRUCK_MIN_CONF || '0.45'),
+  yoloPersonMinConfidence: parseFloat(process.env.YOLO_PERSON_MIN_CONF || '0.35'),
 };

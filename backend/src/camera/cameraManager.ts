@@ -2,6 +2,9 @@ import { db } from '../database/excelDb.js';
 import { logger } from '../utils/logger.js';
 import { getKolkataTimestamp, getKolkataDateString } from '../utils/dateUtils.js';
 import { MotionDetector } from '../detection/motionDetector.js';
+import { analyzeDetections } from '../detection/sceneClassifier.js';
+import { detectObjects } from '../services/yoloDetector.js';
+import { config as appConfig } from '../config/index.js';
 import { SyntheticStreamer } from './syntheticStreamer.js';
 import { FFmpegStreamer } from './ffmpegStreamer.js';
 import { CountService } from '../services/countService.js';
@@ -13,6 +16,11 @@ import {
   registerDeviceCameraHandlers,
 } from '../sockets/socketServer.js';
 import type { Camera, CameraSettings, CameraConfig } from '../models/types.js';
+import type { AiStatus, DetectedObject } from './types.js';
+
+// A live source (device / RTSP) is considered active while frames keep arriving within this window
+const LIVE_SOURCE_TIMEOUT_MS = 3000;
+const RTSP_SOURCE_TIMEOUT_MS = 5000;
 
 interface CameraPipeline {
   camera: Camera;
@@ -24,7 +32,10 @@ interface CameraPipeline {
   isRunning: boolean;
   activeSource: 'synthetic' | 'device' | 'rtsp';
   lastDeviceFrameTime: number;
-  prevDeviceSampleBuffer?: Buffer;
+  lastRtspFrameTime: number;
+  detectionInFlight: boolean;
+  aiStatus: AiStatus;
+  lastObjects: DetectedObject[];
 }
 
 export class CameraManager {
@@ -88,28 +99,61 @@ export class CameraManager {
       detector,
       syntheticStreamer,
       isRunning: false,
-      activeSource: config.rtspUrl && config.streamType === 'rtsp' ? 'rtsp' : 'synthetic',
+      activeSource: 'synthetic',
       lastDeviceFrameTime: 0,
+      lastRtspFrameTime: 0,
+      detectionInFlight: false,
+      aiStatus: 'simulated',
+      lastObjects: [],
     };
 
-    if (config.rtspUrl && config.streamType === 'rtsp') {
-      pipeline.ffmpegStreamer = new FFmpegStreamer(
-        cam.location_id,
-        locName,
-        config.rtspUrl,
-        (frameBuffer) => {
-          // Process incoming RTSP frame
-        },
-        (status) => {
-          cam.status = status;
-          db.updateCamera(cam.id, { status });
-          broadcastCameraStatus({ cameraId: cam.id, locationId: cam.location_id, status });
-        }
-      );
+    this.pipelines.set(cam.location_id, pipeline);
+    this.configureRtsp(pipeline, config);
+    this.startPipeline(cam.location_id);
+  }
+
+  /**
+   * (Re)create the FFmpeg RTSP ingest for a pipeline. RTSP is only used when the camera
+   * is explicitly configured with streamType 'rtsp' and a URL.
+   */
+  private configureRtsp(pipeline: CameraPipeline, config: CameraConfig): void {
+    if (pipeline.ffmpegStreamer) {
+      pipeline.ffmpegStreamer.stop();
+      pipeline.ffmpegStreamer = undefined;
+      pipeline.lastRtspFrameTime = 0;
     }
 
-    this.pipelines.set(cam.location_id, pipeline);
-    this.startPipeline(cam.location_id);
+    if (!config.rtspUrl || config.streamType !== 'rtsp') return;
+
+    const locationId = pipeline.camera.location_id;
+    pipeline.ffmpegStreamer = new FFmpegStreamer(
+      locationId,
+      pipeline.locationName,
+      config.rtspUrl,
+      (frameBuffer) => {
+        pipeline.lastRtspFrameTime = Date.now();
+        // Device camera (operator webcam) takes priority over RTSP while it is streaming
+        if (pipeline.activeSource === 'device' && Date.now() - pipeline.lastDeviceFrameTime < LIVE_SOURCE_TIMEOUT_MS) {
+          return;
+        }
+        if (pipeline.activeSource !== 'rtsp') {
+          pipeline.detector.reset();
+          pipeline.lastObjects = [];
+        }
+        pipeline.activeSource = 'rtsp';
+        this.handleLiveFrame(pipeline, `data:image/jpeg;base64,${frameBuffer.toString('base64')}`, 'rtsp');
+      },
+      (status) => {
+        if (pipeline.camera.status === status) return;
+        pipeline.camera.status = status;
+        db.updateCamera(pipeline.camera.id, { status });
+        broadcastCameraStatus({ cameraId: pipeline.camera.id, locationId, status, source: 'rtsp' });
+      }
+    );
+
+    if (pipeline.isRunning) {
+      pipeline.ffmpegStreamer.start();
+    }
   }
 
   /**
@@ -120,23 +164,27 @@ export class CameraManager {
     if (!pipeline || pipeline.isRunning) return;
 
     pipeline.isRunning = true;
+    pipeline.ffmpegStreamer?.start();
     const fps = 6;
     const intervalMs = Math.round(1000 / fps);
 
     pipeline.streamInterval = setInterval(() => {
       if (!pipeline.isRunning) return;
 
-      // If a device camera (webcam/bluetooth) is actively streaming, don't overwrite with synthetic
+      // If a live camera (device webcam/bluetooth or RTSP) is actively streaming, don't overwrite with synthetic
       const now = Date.now();
       if (pipeline.activeSource === 'device') {
-        if (now - pipeline.lastDeviceFrameTime < 3000) {
-          // Device stream is active and fresh
+        if (now - pipeline.lastDeviceFrameTime < LIVE_SOURCE_TIMEOUT_MS) {
           return;
-        } else {
-          // Device stream timed out, fall back to synthetic
-          pipeline.activeSource = 'synthetic';
-          logger.info(`Device camera stream for ${pipeline.locationName} timed out. Reverting to virtual feed.`);
         }
+        logger.info(`Device camera stream for ${pipeline.locationName} timed out. Reverting to virtual feed.`);
+        this.revertToVirtualFeed(pipeline);
+      } else if (pipeline.activeSource === 'rtsp') {
+        if (now - pipeline.lastRtspFrameTime < RTSP_SOURCE_TIMEOUT_MS) {
+          return;
+        }
+        logger.info(`RTSP stream for ${pipeline.locationName} stalled. Showing virtual feed until it recovers.`);
+        this.revertToVirtualFeed(pipeline);
       }
 
       const stage = pipeline.detector.getStage();
@@ -170,6 +218,8 @@ export class CameraManager {
         stage: currentStage,
         classification: currentClassification,
         confidence: currentConfidence,
+        source: 'synthetic',
+        aiStatus: 'simulated',
       });
     }, intervalMs);
 
@@ -177,72 +227,70 @@ export class CameraManager {
   }
 
   /**
-   * Handle incoming device camera frame from browser webcam / USB / Bluetooth camera
+   * Handle incoming device camera frame from browser webcam / USB / Bluetooth camera.
+   * Any client-side "metrics" are deliberately ignored: classification is done server-side by YOLO26.
    */
-  public handleDeviceFrame(
-    locationId: number,
-    frameBase64: string,
-    clientMetrics?: {
-      motionScore?: number;
-      spatialMassPercent?: number;
-      isHumanProfile?: boolean;
-    }
-  ): void {
+  public handleDeviceFrame(locationId: number, frameBase64: string): void {
     const pipeline = this.pipelines.get(locationId);
     if (!pipeline) return;
 
+    if (pipeline.activeSource !== 'device') {
+      // Switching from virtual/RTSP feed: start the passage state machine from a clean slate
+      pipeline.detector.reset();
+      pipeline.lastObjects = [];
+    }
     pipeline.activeSource = 'device';
     pipeline.lastDeviceFrameTime = Date.now();
 
-    // Estimate motion delta from incoming frame buffer if not provided by client
-    let calculatedMotionScore = 5;
-    try {
-      const base64Data = frameBase64.replace(/^data:image\/\w+;base64,/, '');
-      const currentBuffer = Buffer.from(base64Data, 'base64');
+    this.handleLiveFrame(pipeline, frameBase64, 'device');
+  }
 
-      if (pipeline.prevDeviceSampleBuffer && pipeline.prevDeviceSampleBuffer.length > 0) {
-        let diffSum = 0;
-        const sampleStep = 16;
-        const minLen = Math.min(currentBuffer.length, pipeline.prevDeviceSampleBuffer.length);
-        let sampleCount = 0;
+  /**
+   * Shared path for every real camera frame (device or RTSP):
+   * 1) broadcast immediately so the control room sees a low-latency feed
+   * 2) run YOLO26 (one request in flight per camera) and feed the passage state machine
+   */
+  private handleLiveFrame(pipeline: CameraPipeline, frameBase64: string, source: 'device' | 'rtsp'): void {
+    this.broadcastLiveFrame(pipeline, frameBase64, source);
 
-        for (let i = 0; i < minLen; i += sampleStep) {
-          diffSum += Math.abs(currentBuffer[i] - pipeline.prevDeviceSampleBuffer[i]);
-          sampleCount++;
-        }
+    if (pipeline.camera.detection_enabled !== 1 || pipeline.detectionInFlight) return;
 
-        if (sampleCount > 0) {
-          const avgDiff = diffSum / sampleCount; // 0 to 255
-          calculatedMotionScore = Math.min(100, Math.round((avgDiff / 60) * 100));
-        }
-      }
-      pipeline.prevDeviceSampleBuffer = currentBuffer;
-    } catch {
-      calculatedMotionScore = 15;
+    pipeline.detectionInFlight = true;
+    this.runAiDetection(pipeline, frameBase64)
+      .catch((err) => logger.error(`AI detection failed for ${pipeline.locationName}:`, err))
+      .finally(() => {
+        pipeline.detectionInFlight = false;
+      });
+  }
+
+  private async runAiDetection(pipeline: CameraPipeline, frameBase64: string): Promise<void> {
+    const result = await detectObjects(frameBase64);
+
+    // The source may have switched back to the virtual feed while YOLO was running
+    if (pipeline.activeSource === 'synthetic') return;
+
+    if (!result) {
+      // Detector offline: NEVER guess. Feed an empty scene so any pending entry decays without counting.
+      pipeline.aiStatus = 'offline';
+      pipeline.lastObjects = [];
+      pipeline.detector.processDetection({ truckDetected: false, humanDetected: false, confidence: 0 });
+      return;
     }
 
-    // Use optical spatial metrics from browser canvas if provided, or intelligent fallback
-    const effectiveMotion =
-      clientMetrics?.motionScore !== undefined ? clientMetrics.motionScore : calculatedMotionScore;
-    const effectiveMass =
-      clientMetrics?.spatialMassPercent !== undefined
-        ? clientMetrics.spatialMassPercent
-        : effectiveMotion < 40
-        ? 15
-        : effectiveMotion;
-    const effectiveIsHuman =
-      clientMetrics?.isHumanProfile !== undefined
-        ? clientMetrics.isHumanProfile
-        : effectiveMass < 30;
+    const scene = analyzeDetections(result, pipeline.detector.getConfig().roi, {
+      vehicleClasses: appConfig.yoloVehicleClasses,
+      truckMinConfidence: appConfig.yoloTruckMinConfidence,
+      personMinConfidence: appConfig.yoloPersonMinConfidence,
+    });
 
-    // Process motion inside the detector with spatial analysis
-    if (pipeline.camera.detection_enabled === 1) {
-      pipeline.detector.processMotion(effectiveMotion, effectiveMass, effectiveIsHuman);
-    }
+    pipeline.aiStatus = 'online';
+    pipeline.lastObjects = scene.objects;
+    pipeline.detector.processDetection(scene);
+  }
 
+  private broadcastLiveFrame(pipeline: CameraPipeline, frameBase64: string, source: 'device' | 'rtsp'): void {
     const currentStage = pipeline.detector.getStage();
     const currentClassification = pipeline.detector.getClassification();
-    const currentConfidence = pipeline.detector.getConfidence();
 
     // Broadcast frame to ALL connected users (Admin, Monitoring, Operators)
     broadcastCameraFrame({
@@ -250,20 +298,31 @@ export class CameraManager {
       cameraId: pipeline.camera.id,
       timestamp: getKolkataTimestamp(),
       frameBase64,
-      motionScore: effectiveMotion,
+      motionScore: 0,
       isVehicleDetected: currentStage === 'IN_PASSAGE' || currentClassification === 'TRUCK_VERIFIED',
       stage: currentStage,
       classification: currentClassification,
-      confidence: currentConfidence,
+      confidence: pipeline.detector.getConfidence(),
+      source,
+      aiStatus: pipeline.aiStatus,
+      objects: pipeline.lastObjects,
+      roi: pipeline.detector.getConfig().roi,
     });
+  }
+
+  private revertToVirtualFeed(pipeline: CameraPipeline): void {
+    pipeline.activeSource = 'synthetic';
+    pipeline.lastDeviceFrameTime = 0;
+    pipeline.aiStatus = 'simulated';
+    pipeline.lastObjects = [];
+    pipeline.detector.reset();
   }
 
   public handleDeviceDisconnect(locationId: number): void {
     const pipeline = this.pipelines.get(locationId);
-    if (!pipeline) return;
+    if (!pipeline || pipeline.activeSource !== 'device') return;
 
-    pipeline.activeSource = 'synthetic';
-    pipeline.lastDeviceFrameTime = 0;
+    this.revertToVirtualFeed(pipeline);
     logger.info(`Device camera disconnected for ${pipeline.locationName}. Reverted to virtual feed.`);
   }
 
@@ -395,6 +454,17 @@ export class CameraManager {
     const updated = db.updateCamera(cameraId, {
       connection_configuration: JSON.stringify(merged),
     });
+
+    const pipeline = this.pipelines.get(cam.location_id);
+    const rtspChanged =
+      merged.rtspUrl !== currentConfig.rtspUrl || merged.streamType !== currentConfig.streamType;
+    if (pipeline && updated) {
+      pipeline.camera = updated;
+      if (rtspChanged) {
+        this.configureRtsp(pipeline, merged);
+        if (pipeline.activeSource === 'rtsp') this.revertToVirtualFeed(pipeline);
+      }
+    }
 
     return updated;
   }

@@ -108,7 +108,20 @@ export class CameraController {
 
       // Update RTSP configuration if provided
       if (rtspUrl !== undefined) {
-        cameraManager.updateCameraConfig(id, { rtspUrl });
+        let currentUrl: string | undefined;
+        try {
+          currentUrl = JSON.parse(cam.connection_configuration).rtspUrl;
+        } catch {
+          currentUrl = undefined;
+        }
+        const nextUrl = String(rtspUrl).trim();
+        // Only switch the live source when the URL actually changes (the form always re-sends it)
+        if (nextUrl !== (currentUrl || '')) {
+          cameraManager.updateCameraConfig(id, {
+            rtspUrl: nextUrl,
+            streamType: nextUrl ? 'rtsp' : 'synthetic',
+          });
+        }
       }
 
       const updatedCam = db.getCameraById(id);
