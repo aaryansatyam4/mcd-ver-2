@@ -25,7 +25,7 @@ export function createApp() {
     // Serve static files from backend public directory (including database.xlsx)
     app.use('/public', express.static(config.publicDir));
     // Health check endpoint
-    app.get('/api/health', (req, res) => {
+    app.get('/api/health', (_req, res) => {
         res.json({
             status: 'healthy',
             time: new Date().toISOString(),

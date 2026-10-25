@@ -1,4 +1,4 @@
-import express from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
@@ -30,7 +30,7 @@ export function createApp() {
   app.use('/public', express.static(config.publicDir));
 
   // Health check endpoint
-  app.get('/api/health', (req, res) => {
+  app.get('/api/health', (_req: Request, res: Response) => {
     res.json({
       status: 'healthy',
       time: new Date().toISOString(),
@@ -60,7 +60,7 @@ export function createApp() {
 
   if (distDir) {
     app.use(express.static(distDir));
-    app.get('*', (req, res, next) => {
+    app.get('*', (req: Request, res: Response, next: NextFunction) => {
       if (req.path.startsWith('/api') || req.path.startsWith('/public') || req.path.startsWith('/socket.io')) {
         return next();
       }
