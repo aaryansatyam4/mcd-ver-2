@@ -69,6 +69,12 @@ counting, so a person walking past or standing close to the camera can never inc
 - **Local / PM2:** the backend starts `python3 backend/yolo/detect_server.py` automatically on port 5002
   (`pip install ultralytics fastapi uvicorn pillow` first). Set `YOLO_PYTHON` to use a virtualenv's python.
 - **Docker:** `docker compose up` runs it as the separate `yolo` service (`YOLO_URL=http://yolo:5002`).
+- **Render:** the backend's Node runtime has no Python, so YOLO must run as its own Docker web service
+  (`wheelwash-yolo` in `render.yaml`). If you create it by hand, set *Dockerfile Path* to `backend/yolo/Dockerfile`
+  **and** *Docker Build Context Directory* to `backend/yolo` (the Dockerfile copies `detect_server.py` and
+  `yolo26n.pt` from that folder), pick a paid instance (PyTorch does not fit the free plan), then set
+  `YOLO_URL=https://<your-yolo-service>.onrender.com` and `YOLO_AUTOSTART=false` on the backend.
+  `GET /api/health` reports `yolo.online` so you can check the link.
 - Tunables (see `backend/.env.example`): `YOLO_URL`, `YOLO_VEHICLE_CLASSES`, `YOLO_TRUCK_MIN_CONF`, `YOLO_PERSON_MIN_CONF`.
 
 The virtual demo feed (Demo Control Bar) is simulated and keeps working without YOLO.
