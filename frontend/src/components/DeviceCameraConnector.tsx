@@ -26,6 +26,7 @@ export const DeviceCameraConnector: React.FC<DeviceCameraConnectorProps> = ({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const streamIntervalRef = useRef<any>(null);
+  const isStreamingRef = useRef<boolean>(false);
 
   // Enumerate cameras (webcams, USB cams, Bluetooth cams, phone/continuity cams)
   const enumerateCameras = async () => {
@@ -53,6 +54,20 @@ export const DeviceCameraConnector: React.FC<DeviceCameraConnectorProps> = ({
     }
   }, [isOpen]);
 
+  // Server refuses frames from users who may not stream to this location
+  useEffect(() => {
+    if (!socket) return;
+    const onRejected = (data: { locationId: number; reason: string }) => {
+      if (data.locationId !== locationId) return;
+      setStreamError(data.reason);
+      stopStreaming();
+    };
+    socket.on('camera:ingest_rejected', onRejected);
+    return () => {
+      socket.off('camera:ingest_rejected', onRejected);
+    };
+  }, [socket, locationId]);
+
   const startStreaming = async () => {
     setStreamError(null);
     try {
@@ -70,95 +85,29 @@ export const DeviceCameraConnector: React.FC<DeviceCameraConnectorProps> = ({
       }
 
       setIsStreaming(true);
+      isStreamingRef.current = true;
 
-      // Canvas frame pump to backend via WebSockets
+      // Canvas frame pump to backend via WebSockets.
+      // Truck vs human classification is done server-side by YOLO26 on the raw frame.
       const fps = 6;
       let framesSent = 0;
       const intervalMs = Math.round(1000 / fps);
-      let prevRoiSampleBuffer: Uint8ClampedArray | null = null;
 
       streamIntervalRef.current = setInterval(() => {
         if (!videoRef.current || !canvasRef.current || !socket) return;
 
         const video = videoRef.current;
         const canvas = canvasRef.current;
-        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        const ctx = canvas.getContext('2d');
 
         if (video.videoWidth > 0 && video.videoHeight > 0 && ctx) {
           canvas.width = 640;
           canvas.height = 360;
           ctx.drawImage(video, 0, 0, 640, 360);
 
-          // Optical Motion & Spatial Mass Analysis in the Wheel Wash Bay (ROI)
-          // ROI: 20% to 80% horizontal, 30% to 80% vertical
-          const roiX = 128;
-          const roiY = 108;
-          const roiW = 384;
-          const roiH = 180;
-          const step = 8; // 8px grid sampling
-
-          const imgData = ctx.getImageData(roiX, roiY, roiW, roiH);
-          const currentPixels = imgData.data;
-
-          let movingCount = 0;
-          let minX = roiW, maxX = 0, minY = roiH, maxY = 0;
-          const totalSamples = (roiW / step) * (roiH / step);
-
-          if (prevRoiSampleBuffer && prevRoiSampleBuffer.length === currentPixels.length) {
-            for (let y = 0; y < roiH; y += step) {
-              for (let x = 0; x < roiW; x += step) {
-                const idx = (y * roiW + x) * 4;
-                const rDiff = Math.abs(currentPixels[idx] - prevRoiSampleBuffer[idx]);
-                const gDiff = Math.abs(currentPixels[idx + 1] - prevRoiSampleBuffer[idx + 1]);
-                const bDiff = Math.abs(currentPixels[idx + 2] - prevRoiSampleBuffer[idx + 2]);
-                const totalDiff = rDiff + gDiff + bDiff;
-
-                // Threshold of change per pixel
-                if (totalDiff > 45) {
-                  movingCount++;
-                  if (x < minX) minX = x;
-                  if (x > maxX) maxX = x;
-                  if (y < minY) minY = y;
-                  if (y > maxY) maxY = y;
-                }
-              }
-            }
-          }
-
-          // Save current buffer for next delta
-          prevRoiSampleBuffer = new Uint8ClampedArray(currentPixels);
-
-          let motionScore = 0;
-          let spatialMassPercent = 0;
-          let isHumanProfile = false;
-
-          if (movingCount >= 6) {
-            spatialMassPercent = Math.min(100, Math.round((movingCount / totalSamples) * 100));
-            motionScore = Math.min(100, Math.round((movingCount / (totalSamples * 0.35)) * 100));
-
-            const boxW = Math.max(1, maxX - minX);
-            const boxH = Math.max(1, maxY - minY);
-            const aspectRatio = boxW / boxH;
-
-            // Strict Pedestrian vs Commercial Truck classification:
-            // 1) Human: narrow/tall aspect ratio (< 0.85), small width (< 130px), or small area (< 28%)
-            // 2) Truck: wide aspect ratio (>= 0.85), wide bounding span (>= 130px), and heavy mass (>= 28%)
-            if (aspectRatio < 0.85 || spatialMassPercent < 28 || boxW < 130) {
-              isHumanProfile = true;
-            } else {
-              isHumanProfile = false;
-            }
-          }
-
-          const frameBase64 = canvas.toDataURL('image/jpeg', 0.65);
-
-          // Emit to backend with optical classification telemetry
           socket.emit('camera:ingest_frame', {
             locationId,
-            frameBase64,
-            motionScore,
-            spatialMassPercent,
-            isHumanProfile,
+            frameBase64: canvas.toDataURL('image/jpeg', 0.7),
           });
 
           framesSent++;
@@ -186,10 +135,11 @@ export const DeviceCameraConnector: React.FC<DeviceCameraConnectorProps> = ({
       videoRef.current.srcObject = null;
     }
 
-    if (socket && isStreaming) {
+    if (socket && isStreamingRef.current) {
       socket.emit('camera:disconnect_device', { locationId });
     }
 
+    isStreamingRef.current = false;
     setIsStreaming(false);
     setFpsCount(0);
   };
@@ -303,7 +253,7 @@ export const DeviceCameraConnector: React.FC<DeviceCameraConnectorProps> = ({
               <CheckCircle className="w-4 h-4 text-blue-600" />
               Live Control Room Synchronization
             </div>
-            As soon as you start streaming, Master Admin and all monitoring dashboards will see your live camera view in <strong className="font-semibold">{locationName}</strong> automatically, and the in-memory motion detection will count passing trucks!
+            As soon as you start streaming, Master Admin and all monitoring dashboards will see your live camera view in <strong className="font-semibold">{locationName}</strong> automatically, and the YOLO26 AI detector will count passing trucks. People and workers are never counted.
           </div>
 
           {/* Buttons */}

@@ -52,14 +52,12 @@ export class MotionDetector {
         return this.confidence;
     }
     /**
-     * Process frame motion with Human vs Heavy Truck classification:
+     * Process frame motion with Human vs Heavy Truck classification (virtual demo feed):
      * @param motionScore 0-100 overall optical motion
      * @param spatialMassPercent 0-100 estimated spatial bounding area in ROI
      * @param isHumanProfile boolean flag if aspect ratio is narrow/tall pedestrian
      */
     processMotion(motionScore, spatialMassPercent = motionScore, isHumanProfile = false) {
-        const now = Date.now();
-        let triggered = false;
         const threshold = this.config.sensitivity || 60;
         const isMotionSignificant = motionScore >= threshold;
         const minTruckMass = this.config.minTruckAreaPercent || 30;
@@ -71,13 +69,35 @@ export class MotionDetector {
         // A Heavy Truck is characterized by:
         // Broad, heavy mass (>= minTruckMass) AND NOT having a human profile
         const isTruckDetected = isMotionSignificant && !isHumanProfile && spatialMassPercent >= minTruckMass;
+        const confidence = isHumanDetected
+            ? Math.min(96, Math.max(80, Math.round(95 - spatialMassPercent * 0.5)))
+            : Math.min(99, Math.max(85, Math.round(82 + spatialMassPercent * 0.16)));
+        return this.step(isTruckDetected, isHumanDetected, confidence, `Mass: ${spatialMassPercent}%, Motion: ${motionScore}%`);
+    }
+    /**
+     * Process an AI object-detection result (YOLO26) for a live camera frame.
+     * Only a detected truck in the ROI can ever advance the counter; people are always ignored.
+     */
+    processDetection(scene) {
+        const isTruckDetected = scene.truckDetected;
+        const isHumanDetected = !scene.truckDetected && scene.humanDetected;
+        return this.step(isTruckDetected, isHumanDetected, scene.confidence, `YOLO confidence: ${scene.confidence}%`);
+    }
+    /**
+     * Passage state machine: IDLE -> ENTERED_ZONE -> IN_PASSAGE (+1) -> COOLDOWN -> IDLE.
+     * A passage is counted exactly once, and the zone must stay free of trucks for
+     * cooldownSeconds before the next truck can be counted.
+     */
+    step(isTruckDetected, isHumanDetected, detectedConfidence, logContext) {
+        const now = Date.now();
+        let triggered = false;
         if (isHumanDetected) {
             this.classification = 'HUMAN_IGNORED';
-            this.confidence = Math.min(96, Math.max(80, Math.round(95 - spatialMassPercent * 0.5)));
+            this.confidence = detectedConfidence;
         }
         else if (isTruckDetected) {
             this.classification = 'TRUCK_VERIFIED';
-            this.confidence = Math.min(99, Math.max(85, Math.round(82 + spatialMassPercent * 0.16)));
+            this.confidence = detectedConfidence;
         }
         else if (this.stage === 'IN_PASSAGE') {
             this.classification = 'TRUCK_VERIFIED';
@@ -95,7 +115,7 @@ export class MotionDetector {
                     // Human/worker in zone: STRICT FILTER - Never trigger entry or increment counter
                     this.stage = 'IDLE';
                     this.truckEvidenceCount = 0;
-                    logger.debug(`[PEDESTRIAN FILTER] Human motion filtered at ${this.locationName} (Mass: ${spatialMassPercent}%, Motion: ${motionScore}%) - Counter Ignored`);
+                    logger.debug(`[PEDESTRIAN FILTER] Human filtered at ${this.locationName} (${logContext}) - Counter Ignored`);
                 }
                 else if (isTruckDetected) {
                     this.stage = 'ENTERED_ZONE';
@@ -120,7 +140,7 @@ export class MotionDetector {
                         this.stage = 'IN_PASSAGE';
                         this.lastPassageAt = now;
                         triggered = true;
-                        logger.info(`[TRUCK VERIFIED (+1)] Heavy truck passage confirmed at ${this.locationName} (Duration: ${duration}ms, Mass: ${spatialMassPercent}%, Confidence: ${this.confidence}%)`);
+                        logger.info(`[TRUCK VERIFIED (+1)] Heavy truck passage confirmed at ${this.locationName} (Duration: ${duration}ms, ${logContext})`);
                         if (this.onVehicleDetectedCallback) {
                             this.onVehicleDetectedCallback(this.locationId);
                         }
@@ -136,7 +156,7 @@ export class MotionDetector {
                 }
                 break;
             case 'IN_PASSAGE':
-                if (isMotionSignificant && isTruckDetected) {
+                if (isTruckDetected) {
                     this.lastTruckDetectedAt = now;
                 }
                 else {
@@ -148,7 +168,7 @@ export class MotionDetector {
                 }
                 break;
             case 'COOLDOWN':
-                if (isMotionSignificant && isTruckDetected) {
+                if (isTruckDetected) {
                     this.zoneClearedAt = now;
                 }
                 else {

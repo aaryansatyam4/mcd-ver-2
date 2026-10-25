@@ -48,17 +48,30 @@ Each location panel features an **Open Camera** button:
 
 ---
 
-## 🧠 AI Classification: Heavy Truck vs. Human / Pedestrian
+## 🧠 AI Classification: Heavy Truck vs. Human / Pedestrian (YOLO26)
 
-The system distinguishes between pedestrians (facility workers, security guards, pedestrians) and commercial heavy trucks:
+Every **real camera frame** (device webcam / USB / Bluetooth, or RTSP CCTV) is classified on the server by the
+YOLO26 object detector (`backend/yolo/detect_server.py` + `yolo26n.pt`). Pixel-motion guesses are **not** used for
+counting, so a person walking past or standing close to the camera can never increment the counter.
 
-1. **Spatial Mass & Area:**
-   - **Humans:** Small spatial mass (< 30% ROI volume) and narrow vertical aspect ratio. Flagged as `HUMAN_IGNORED`, visually highlighted in amber, and **strictly excluded from the truck counter**.
-   - **Trucks:** Massive spatial volume (>= 35–90% ROI area) with broad rectangular profile. Verified as `TRUCK_VERIFIED`, highlighted in emerald green, and increments the counter by exactly 1.
-2. **Optical Persistence:**
-   - Fleeting environmental movements (leaves, dust, water spray glare) are rejected by the minimum duration threshold.
-3. **Duplicate Prevention:**
-   - Automatic cooldown latching ensures each truck is counted once regardless of passage speed.
+1. **Only trucks count:** a `truck` (or `bus`, for large tippers) box with confidence ≥ 0.45 that overlaps the
+   wheel-wash ROI. Cars and every other class are ignored.
+2. **People never count:** `person` boxes are shown as `HUMAN_IGNORED` (amber). A truck still counts when the driver or a
+   washer is visible next to it. A "truck" box that is really the same box as a more confident person is dropped.
+3. **Count once per truck:** the truck must be confirmed on at least 2 frames, then the bay must be free of trucks for
+   `cooldownSeconds` before the next truck can be counted. A truck parked in the bay while it is washed counts once.
+4. **Fail safe:** if the YOLO detector is offline, live cameras show *"AI DETECTOR OFFLINE — AUTOMATIC COUNTING PAUSED"*
+   and nothing is counted until it is back.
+5. **Secure ingest:** only the Master Admin or the operator assigned to that location can stream a device camera into it.
+
+### Running the YOLO detector
+
+- **Local / PM2:** the backend starts `python3 backend/yolo/detect_server.py` automatically on port 5002
+  (`pip install ultralytics fastapi uvicorn pillow` first). Set `YOLO_PYTHON` to use a virtualenv's python.
+- **Docker:** `docker compose up` runs it as the separate `yolo` service (`YOLO_URL=http://yolo:5002`).
+- Tunables (see `backend/.env.example`): `YOLO_URL`, `YOLO_VEHICLE_CLASSES`, `YOLO_TRUCK_MIN_CONF`, `YOLO_PERSON_MIN_CONF`.
+
+The virtual demo feed (Demo Control Bar) is simulated and keeps working without YOLO.
 
 ---
 
@@ -97,10 +110,10 @@ You can directly open `backend/public/database.xlsx` in Microsoft Excel anytime 
 cd /Users/aryansatyam/Desktop/Pesi/MCD/backend
 npm run test
 ```
-All 15 integration and unit tests pass:
+All 30 integration and unit tests pass:
 - Login authentication & role-based restrictions
 - Location-level access control (operators blocked from other sites)
-- **Human vs Heavy Truck classification** (human presence ignored, truck counted)
+- **Human vs Heavy Truck classification** with YOLO26 (people never counted, truck counted once, nothing counted when the AI is offline)
 - Motion detection state machine & cooldown duplicate prevention
 - Clean audit history
 - Daily, Weekly, Monthly, and Yearly reports in Asia/Kolkata timezone

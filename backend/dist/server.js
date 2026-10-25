@@ -5,6 +5,7 @@ import { logger } from './utils/logger.js';
 import { db } from './database/excelDb.js';
 import { initSocketServer } from './sockets/socketServer.js';
 import { cameraManager } from './camera/cameraManager.js';
+import { ensureYoloService, stopYoloService } from './services/yoloSupervisor.js';
 async function bootstrap() {
     try {
         logger.info('==================================================');
@@ -18,9 +19,11 @@ async function bootstrap() {
         // 3. Initialize Real-Time WebSockets
         initSocketServer(server, config.corsOrigin);
         logger.info('Socket.IO real-time server attached');
-        // 4. Initialize Camera Manager and Motion Detection Pipelines
+        // 4. Start / attach the YOLO26 truck-vs-human detector (non-blocking: model load can take a while)
+        ensureYoloService().catch((err) => logger.warn('YOLO26 startup check failed:', err));
+        // 5. Initialize Camera Manager and Motion Detection Pipelines
         await cameraManager.init();
-        // 5. Start Listening
+        // 6. Start Listening
         server.listen(config.port, () => {
             logger.info(`WheelWash Monitor API Server running at http://localhost:${config.port}`);
             logger.info(`Excel Database available at: ${config.excelDbPath}`);
@@ -37,6 +40,7 @@ async function bootstrap() {
         const gracefulShutdown = async (signal) => {
             logger.info(`Received ${signal}. Gracefully stopping WheelWash Monitor...`);
             cameraManager.shutdown();
+            stopYoloService();
             await db.saveToDisk();
             server.close(() => {
                 logger.info('HTTP server closed. Exiting process.');

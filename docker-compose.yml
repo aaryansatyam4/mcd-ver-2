@@ -14,3 +14,14 @@ services:
       - NODE_ENV=production
       - PORT=5001
       - TIMEZONE=Asia/Kolkata
+      # Truck vs Human AI detector (live camera frames are only counted when YOLO confirms a truck)
+      - YOLO_URL=http://yolo:5002
+    depends_on:
+      - yolo
+
+  yolo:
+    build: ./backend/yolo
+    container_name: wheelwash-yolo
+    restart: always
+    expose:
+      - "5002"
