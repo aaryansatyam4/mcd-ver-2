@@ -17,7 +17,11 @@ export const config = {
   timezone: process.env.TIMEZONE || 'Asia/Kolkata',
   ffmpegPath: process.env.FFMPEG_PATH || 'ffmpeg',
   // YOLO26 sidecar (backend/yolo/detect_server.py). All real camera frames are classified here.
-  yoloUrl: (process.env.YOLO_URL || 'http://127.0.0.1:5002').replace(/\/+$/, ''),
+  // Accepts a bare host:port (Render private network) as well as a full URL
+  yoloUrl: (process.env.YOLO_URL || 'http://127.0.0.1:5002')
+    .trim()
+    .replace(/^(?!https?:\/\/)/, 'http://')
+    .replace(/\/+$/, ''),
   yoloPython: process.env.YOLO_PYTHON || 'python3',
   yoloAutoStart: process.env.YOLO_AUTOSTART !== 'false',
   yoloTimeoutMs: parseInt(process.env.YOLO_TIMEOUT_MS || '4000', 10),

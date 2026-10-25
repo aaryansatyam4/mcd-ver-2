@@ -4,6 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import { config } from './config/index.js';
 import { errorHandler } from './middleware/errorHandler.js';
+import { isYoloAvailable } from './services/yoloDetector.js';
 // Route imports
 import authRoutes from './routes/authRoutes.js';
 import dashboardRoutes from './routes/dashboardRoutes.js';
@@ -25,13 +26,14 @@ export function createApp() {
     // Serve static files from backend public directory (including database.xlsx)
     app.use('/public', express.static(config.publicDir));
     // Health check endpoint
-    app.get('/api/health', (_req, res) => {
+    app.get('/api/health', async (_req, res) => {
         res.json({
             status: 'healthy',
             time: new Date().toISOString(),
             service: 'WheelWash Monitor API',
             database: 'Excel Storage (backend/public/database.xlsx)',
             demoMode: config.demoMode,
+            yolo: { url: config.yoloUrl, online: await isYoloAvailable() },
         });
     });
     // REST API Routes
