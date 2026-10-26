@@ -9,6 +9,8 @@ export default defineConfig({
     env: {
       EXCEL_DB_PATH: path.join(os.tmpdir(), `wheelwash-test-${process.pid}-${Date.now()}.xlsx`),
       YOLO_AUTOSTART: 'false',
+      // Tests never talk to a real Google Sheet
+      GOOGLE_SCRIPT_URL: '',
     },
     fileParallelism: false,
   },

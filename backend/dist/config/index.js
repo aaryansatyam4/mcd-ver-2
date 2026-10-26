@@ -9,6 +9,11 @@ export const config = {
     jwtExpiresIn: process.env.JWT_EXPIRES_IN || '24h',
     publicDir: publicDir,
     excelDbPath: process.env.EXCEL_DB_PATH || path.join(publicDir, 'database.xlsx'),
+    // Google Sheet database: the Web app URL of google-apps-script.js. When set, the sheet is the
+    // source of truth and the local Excel file is only a cache.
+    googleScriptUrl: (process.env.GOOGLE_SCRIPT_URL || '').trim(),
+    googleScriptSecret: (process.env.GOOGLE_SCRIPT_SECRET || '').trim(),
+    googleScriptTimeoutMs: parseInt(process.env.GOOGLE_SCRIPT_TIMEOUT_MS || '30000', 10),
     corsOrigin: process.env.CORS_ORIGIN || 'http://localhost:5173',
     demoMode: process.env.DEMO_MODE !== 'false',
     timezone: process.env.TIMEZONE || 'Asia/Kolkata',

@@ -30,6 +30,12 @@ services:
         generateValue: true
       - key: JWT_EXPIRES_IN
         value: 24h
+      # Google Sheet database (see "Google Sheet Database" in README.md). Without these the data lives
+      # in an Excel file on the instance's disk, which the free plan wipes on every restart/deploy.
+      - key: GOOGLE_SCRIPT_URL
+        sync: false
+      - key: GOOGLE_SCRIPT_SECRET
+        sync: false
 
   # YOLO26 truck-vs-human detector. PyTorch does not fit the free plan, so this needs a paid instance.
   - type: web
