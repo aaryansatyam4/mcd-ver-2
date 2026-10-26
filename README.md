@@ -126,7 +126,7 @@ On the first start the backend copies the existing data into the sheet. After th
 | `audit_logs` | Audit trail |
 | `users`, `locations`, `cameras` | Accounts (hashed passwords), sites, camera settings |
 
-- Make changes through the app. If you edit the data tabs by hand, restart the backend so it reloads them.
+- Make changes through the app where you can. Edits made by hand in the data tabs are picked up automatically within about 30 seconds (set `GOOGLE_SHEET_RELOAD_SECONDS` to change this, `0` turns it off). Keep the `id` column unique and timestamps in the form `2026-10-26 12:37:09`.
 - If Google can't be reached, changes are kept in memory and retried automatically until they are saved.
 - `GET /api/health` shows `database.mode` (`google-sheets` or `excel`), the last sync time, pending changes and any error.
 - After editing the Apps Script, use **Deploy → Manage deployments → Edit → Version: New version → Deploy** so the URL stays the same.

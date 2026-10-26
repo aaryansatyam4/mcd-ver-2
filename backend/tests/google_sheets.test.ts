@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { GoogleSheetsClient, GoogleSheetsSync } from '../src/services/googleSheetsStore.js';
-import { TABLE_NAMES, type Tables } from '../src/database/schema.js';
+import os from 'os';
+import path from 'path';
+import { ExcelDatabase } from '../src/database/excelDb.js';
+import { TABLE_NAMES, normalizeDateText, type Tables } from '../src/database/schema.js';
 import { loadAppsScript, type FakeSpreadsheet } from './helpers/fakeAppsScript.js';
 
 const URL = 'https://script.google.com/macros/s/test/exec';
@@ -177,5 +180,67 @@ describe('Google Sheet database (Apps Script + backend sync)', () => {
 
     await expect(new GoogleSheetsClient(URL, 'wrong').load()).rejects.toThrow(/Wrong secret/);
     await expect(new GoogleSheetsClient(URL, 's3cret').load()).resolves.toEqual({});
+  });
+});
+
+describe('Edits made by hand in the Google Sheet', () => {
+  let spreadsheet: FakeSpreadsheet;
+  let db: ExcelDatabase;
+
+  beforeEach(async () => {
+    const script = loadAppsScript();
+    spreadsheet = script.spreadsheet;
+    vi.stubGlobal('fetch', vi.fn(script.fetchImpl));
+    db = new ExcelDatabase(path.join(os.tmpdir(), `wheelwash-reload-${process.pid}-${Date.now()}.xlsx`));
+    await db.init(new GoogleSheetsClient(URL, ''));
+    await db.flush();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const typeRow = (tab: string, cells: string[]) => spreadsheet.getSheetByName(tab)!.cells.push(cells);
+
+  it('picks up rows added in the sheet without a restart', async () => {
+    typeRow('vehicle_events', ['99', '1', '1', '2026/10/26 9:05', 'automatic']);
+
+    expect(await db.reloadFromGoogleSheet()).toEqual(['vehicle_events']);
+    expect(db.getVehicleEvents().find((e) => e.id === 99)?.event_timestamp).toBe('2026-10-26 09:05:00');
+    expect(db.getEventsByLocationAndDate(1, '2026-10-26').map((e) => e.id)).toContain(99);
+
+    // New local events continue after the highest id in the sheet
+    expect(db.recordVehicleEvent({ location_id: 1, camera_id: 1, event_timestamp: '2026-10-26 10:00:00', detection_source: 'automatic' }).id).toBe(100);
+  });
+
+  it('reports nothing when the sheet was not edited', async () => {
+    expect(await db.reloadFromGoogleSheet()).toEqual([]);
+    db.recordVehicleEvent({ location_id: 1, camera_id: 1, event_timestamp: '2026-10-26 10:00:00', detection_source: 'automatic' });
+    await db.flush();
+    expect(await db.reloadFromGoogleSheet()).toEqual([]);
+  });
+
+  it('never drops a local change that the sheet does not have yet', async () => {
+    typeRow('vehicle_events', ['50', '1', '1', '2026-10-26 08:00:00', 'automatic']);
+    const reload = db.reloadFromGoogleSheet();
+    const local = db.recordVehicleEvent({ location_id: 2, camera_id: 2, event_timestamp: '2026-10-26 08:30:00', detection_source: 'automatic' });
+
+    expect(await reload).toEqual([]);
+    expect(db.getVehicleEvents()).toContainEqual(local);
+
+    // Once the local change is saved, the next reload brings in the sheet edit as well
+    await db.flush();
+    await db.reloadFromGoogleSheet();
+    expect(db.getVehicleEvents().map((e) => e.id).sort((a, b) => a - b)).toEqual([local.id, 50].sort((a, b) => a - b));
+  });
+});
+
+describe('normalizeDateText', () => {
+  it('brings hand-typed dates into the stored format', () => {
+    expect(normalizeDateText('2026-10-26 12:37:09')).toBe('2026-10-26 12:37:09');
+    expect(normalizeDateText('2026/10/26 9:05')).toBe('2026-10-26 09:05:00');
+    expect(normalizeDateText('2026-10-26T12:37:09.000')).toBe('2026-10-26 12:37:09');
+    expect(normalizeDateText('2026-1-5')).toBe('2026-01-05');
+    expect(normalizeDateText('duplicate trucks')).toBe('duplicate trucks');
   });
 });

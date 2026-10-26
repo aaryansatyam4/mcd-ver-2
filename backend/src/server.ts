@@ -3,7 +3,7 @@ import { createApp } from './app.js';
 import { config } from './config/index.js';
 import { logger } from './utils/logger.js';
 import { db } from './database/excelDb.js';
-import { initSocketServer } from './sockets/socketServer.js';
+import { broadcastCountUpdated, initSocketServer } from './sockets/socketServer.js';
 import { cameraManager } from './camera/cameraManager.js';
 import { ensureYoloService, stopYoloService } from './services/yoloSupervisor.js';
 import { CountService } from './services/countService.js';
@@ -40,6 +40,10 @@ async function bootstrap() {
     // 1. Initialize Database (Google Sheet when GOOGLE_SCRIPT_URL is set, otherwise the Excel file)
     await db.init();
     db.sheets?.setDashboardProvider(buildSheetDashboard);
+    // Edits made by hand in the sheet show up on the dashboard without a restart
+    db.startGoogleSheetReload(config.googleSheetReloadSeconds * 1000, () => {
+      broadcastCountUpdated(CountService.getDashboardSummary());
+    });
 
     // 2. Setup HTTP & Express Server
     const app = createApp();

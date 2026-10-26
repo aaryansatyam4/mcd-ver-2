@@ -23,8 +23,8 @@
  *   Dashboard          today's truck count per site (refreshed on every change)
  *   locations, users, cameras, vehicle_events, count_adjustments, audit_logs
  *
- * Edit data through the WheelWash app. If you edit the data tabs by hand,
- * restart the backend afterwards so it reloads them.
+ * Edit data through the WheelWash app where you can. Edits made by hand in the
+ * data tabs are picked up by the backend within about 30 seconds.
  *
  * After changing this script, use Deploy > Manage deployments > Edit >
  * Version: "New version" > Deploy, so the same URL keeps working.
