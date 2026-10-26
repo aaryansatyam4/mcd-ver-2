@@ -128,7 +128,7 @@ On the first start the backend copies the existing data into the sheet. After th
 
 - Make changes through the app. If you edit the data tabs by hand, restart the backend so it reloads them.
 - If Google can't be reached, changes are kept in memory and retried automatically until they are saved.
-- `GET /api/health` shows `database.mode` (`google-sheets` or `excel`), the last sync time, pending changes and any error. When the sheet is connected, the **Google Sheet** button in the top bar opens it.
+- `GET /api/health` shows `database.mode` (`google-sheets` or `excel`), the last sync time, pending changes and any error.
 - After editing the Apps Script, use **Deploy → Manage deployments → Edit → Version: New version → Deploy** so the URL stays the same.
 
 ---
@@ -145,7 +145,7 @@ Without `GOOGLE_SCRIPT_URL`, records are stored in Microsoft Excel format in `ba
   5. `count_adjustments`: Historical adjustments.
   6. `audit_logs`: Detailed non-repudiation audit trails (excluding manual adjustments).
 
-You can directly open `backend/public/database.xlsx` in Microsoft Excel anytime or click the **Excel Database** download button in the top navigation bar.
+You can directly open `backend/public/database.xlsx` in Microsoft Excel anytime or use the **Download Excel** button in the demo control bar.
 
 ---
 
