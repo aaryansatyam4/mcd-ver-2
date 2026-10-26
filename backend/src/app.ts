@@ -24,6 +24,8 @@ export function createApp() {
   app.use(cors({
     origin: '*',
     credentials: true,
+    // Lets the browser read the file name of report exports
+    exposedHeaders: ['Content-Disposition'],
   }));
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));

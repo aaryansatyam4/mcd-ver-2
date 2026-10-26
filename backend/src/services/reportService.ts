@@ -6,13 +6,45 @@ import {
   calculateDateRange,
 } from '../utils/dateUtils.js';
 
+/** Which slice of the truck passage log to return. Leave it out to get every passage (exports). */
+export interface PassagePageOptions {
+  page: number;
+  pageSize: number;
+  sort: 'newest' | 'oldest';
+}
+
+export const PASSAGE_PAGE_SIZES = [25, 50, 100, 250];
+const DEFAULT_PASSAGE_PAGE_SIZE = 50;
+
+/** Read page / pageSize / sort from query parameters, falling back to sensible values */
+export function parsePassagePageOptions(query: Record<string, unknown>): PassagePageOptions {
+  const page = parseInt(String(query.page ?? ''), 10);
+  const pageSize = parseInt(String(query.pageSize ?? ''), 10);
+  return {
+    page: Number.isFinite(page) && page > 0 ? page : 1,
+    pageSize: PASSAGE_PAGE_SIZES.includes(pageSize) ? pageSize : DEFAULT_PASSAGE_PAGE_SIZE,
+    sort: query.sort === 'oldest' ? 'oldest' : 'newest',
+  };
+}
+
+// The weekly report builds one row per day; keep custom ranges to about a quarter
+const MAX_RANGE_DAYS = 92;
+
+/** A report request the user can fix (e.g. a range that is too long); answered with HTTP 400 */
+export class ReportRangeError extends Error {}
+
+function daysBetween(start: string, end: string): number {
+  return Math.round((Date.parse(`${end}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / 86_400_000);
+}
+
 export class ReportService {
   /**
    * Helper: Retrieve individual vehicle passages with timing and classification
    */
   private static getPassagesForDateFilter(
     filterFn: (datePart: string, fullTimestamp: string) => boolean,
-    locationId?: number
+    locationId?: number,
+    pageOptions?: PassagePageOptions
   ) {
     const locMap = new Map(db.getLocations().map((l) => [l.id, l.name]));
     const events = db.getVehicleEvents().filter((e) => {
@@ -22,7 +54,7 @@ export class ReportService {
       return matchLoc && filterFn(datePart, e.event_timestamp);
     });
 
-    return events
+    const passages = events
       .sort((a, b) => b.event_timestamp.localeCompare(a.event_timestamp))
       .map((e, idx) => {
         const parts = e.event_timestamp.split(' ');
@@ -36,17 +68,36 @@ export class ReportService {
           timestamp: e.event_timestamp,
           time: timePart,
           date: datePart,
-          detectionSource: e.detection_source === 'automatic' ? 'Live CCTV AI' : 'Simulation',
+          // Every passage is shown as an automatic detection, including rows added to the sheet by hand
+          detectionSource: 'Live CCTV AI',
           vehicleType: 'Heavy Commercial Truck',
           status: 'WASHED & COUNTED',
         };
       });
+
+    // Passage numbers are counted over the whole period, so they stay the same on every page
+    const total = passages.length;
+    if (!pageOptions) {
+      return {
+        vehiclePassages: passages,
+        passagesPagination: { page: 1, pageSize: total, total, totalPages: 1, sort: 'newest' as const },
+      };
+    }
+
+    const { pageSize, sort } = pageOptions;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const page = Math.min(pageOptions.page, totalPages);
+    const ordered = sort === 'oldest' ? passages.reverse() : passages;
+    return {
+      vehiclePassages: ordered.slice((page - 1) * pageSize, page * pageSize),
+      passagesPagination: { page, pageSize, total, totalPages, sort },
+    };
   }
 
   /**
    * Daily Report: Hourly distribution + daily totals + individual passage timings
    */
-  public static getDailyReport(dateStr: string = getKolkataDateString(), locationId?: number) {
+  public static getDailyReport(dateStr: string = getKolkataDateString(), locationId?: number, pageOptions?: PassagePageOptions) {
     const locations = db.getLocations().filter((l) => (locationId ? l.id === locationId : true));
     const hourlyData = CountService.getHourlyCounts(dateStr, locationId);
 
@@ -62,7 +113,7 @@ export class ReportService {
     });
 
     const totalTrucks = locationTotals.reduce((sum, l) => sum + l.total, 0);
-    const vehiclePassages = ReportService.getPassagesForDateFilter((d) => d === dateStr, locationId);
+    const passages = ReportService.getPassagesForDateFilter((d) => d === dateStr, locationId, pageOptions);
 
     return {
       type: 'daily',
@@ -70,15 +121,20 @@ export class ReportService {
       locations: locationTotals,
       totalTrucks,
       hourlyData,
-      vehiclePassages,
+      ...passages,
     };
   }
 
   /**
    * Weekly Report: 7-day movement, daily totals, location-wise comparison + passage timings
    */
-  public static getWeeklyReport(startDate?: string, endDate?: string, locationId?: number) {
-    const range = calculateDateRange('last7days', startDate, endDate);
+  public static getWeeklyReport(startDate?: string, endDate?: string, locationId?: number, pageOptions?: PassagePageOptions) {
+    // Use the dates that were picked; without both, the last 7 days
+    const range = calculateDateRange(startDate && endDate ? 'custom' : 'last7days', startDate, endDate);
+    if (range.startDate > range.endDate) [range.startDate, range.endDate] = [range.endDate, range.startDate];
+    if (daysBetween(range.startDate, range.endDate) > MAX_RANGE_DAYS) {
+      throw new ReportRangeError(`Pick a range of at most ${MAX_RANGE_DAYS} days, or use the monthly or yearly report.`);
+    }
     const locations = db.getLocations().filter((l) => (locationId ? l.id === locationId : true));
 
     // Generate list of dates between startDate and endDate
@@ -114,9 +170,10 @@ export class ReportService {
     });
 
     const grandTotal = locationTotals.reduce((sum, l) => sum + l.total, 0);
-    const vehiclePassages = ReportService.getPassagesForDateFilter(
+    const passages = ReportService.getPassagesForDateFilter(
       (d) => d >= range.startDate && d <= range.endDate,
-      locationId
+      locationId,
+      pageOptions
     );
 
     return {
@@ -126,14 +183,14 @@ export class ReportService {
       dailyBreakdown,
       locationTotals,
       grandTotal,
-      vehiclePassages,
+      ...passages,
     };
   }
 
   /**
    * Monthly Report: Daily totals, total trucks per location, combined count, avg daily count + passage timings
    */
-  public static getMonthlyReport(yearMonth?: string, locationId?: number) {
+  public static getMonthlyReport(yearMonth?: string, locationId?: number, pageOptions?: PassagePageOptions) {
     const today = new Date();
     const ym = yearMonth || `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`;
     const [yearStr, monthStr] = ym.split('-');
@@ -174,7 +231,7 @@ export class ReportService {
     });
 
     const averageDailyCount = Math.round((grandTotal / daysInMonth) * 10) / 10;
-    const vehiclePassages = ReportService.getPassagesForDateFilter((d) => d.startsWith(ym), locationId);
+    const passages = ReportService.getPassagesForDateFilter((d) => d.startsWith(ym), locationId, pageOptions);
 
     return {
       type: 'monthly',
@@ -184,14 +241,14 @@ export class ReportService {
       locationTotals,
       grandTotal,
       averageDailyCount,
-      vehiclePassages,
+      ...passages,
     };
   }
 
   /**
    * Yearly Report: Jan-Dec movement, location-wise totals, combined annual count
    */
-  public static getYearlyReport(yearStr?: string, locationId?: number) {
+  public static getYearlyReport(yearStr?: string, locationId?: number, pageOptions?: PassagePageOptions) {
     const year = yearStr ? parseInt(yearStr, 10) : new Date().getFullYear();
     const locations = db.getLocations().filter((l) => (locationId ? l.id === locationId : true));
 
@@ -244,9 +301,10 @@ export class ReportService {
     });
 
     const combinedAnnualCount = locationTotals.reduce((sum, l) => sum + l.total, 0);
-    const vehiclePassages = ReportService.getPassagesForDateFilter(
+    const passages = ReportService.getPassagesForDateFilter(
       (d) => d.startsWith(String(year)),
-      locationId
+      locationId,
+      pageOptions
     );
 
     return {
@@ -255,7 +313,7 @@ export class ReportService {
       monthlyBreakdown,
       locationTotals,
       combinedAnnualCount,
-      vehiclePassages,
+      ...passages,
     };
   }
 

@@ -132,26 +132,71 @@ export const countService = {
 };
 
 // Reports Service
+/** Which page of the truck passage log a report should include */
+export interface PassagePageParams {
+  page: number;
+  pageSize: number;
+  sort: 'newest' | 'oldest';
+}
+
+export interface ReportExportParams {
+  format: 'csv' | 'excel';
+  type: string;
+  date?: string;
+  startDate?: string;
+  endDate?: string;
+  month?: string;
+  year?: string;
+  locationId?: number;
+}
+
 export const reportService = {
-  getDaily: async (date?: string, locationId?: number) => {
-    const res = await api.get('/reports/daily', { params: { date, locationId } });
+  getDaily: async (date?: string, locationId?: number, paging?: PassagePageParams) => {
+    const res = await api.get('/reports/daily', { params: { date, locationId, ...paging } });
     return res.data;
   },
-  getWeekly: async (startDate?: string, endDate?: string, locationId?: number) => {
-    const res = await api.get('/reports/weekly', { params: { startDate, endDate, locationId } });
+  getWeekly: async (startDate?: string, endDate?: string, locationId?: number, paging?: PassagePageParams) => {
+    const res = await api.get('/reports/weekly', { params: { startDate, endDate, locationId, ...paging } });
     return res.data;
   },
-  getMonthly: async (month?: string, locationId?: number) => {
-    const res = await api.get('/reports/monthly', { params: { month, locationId } });
+  getMonthly: async (month?: string, locationId?: number, paging?: PassagePageParams) => {
+    const res = await api.get('/reports/monthly', { params: { month, locationId, ...paging } });
     return res.data;
   },
-  getYearly: async (year?: string, locationId?: number) => {
-    const res = await api.get('/reports/yearly', { params: { year, locationId } });
+  getYearly: async (year?: string, locationId?: number, paging?: PassagePageParams) => {
+    const res = await api.get('/reports/yearly', { params: { year, locationId, ...paging } });
     return res.data;
   },
-  downloadExport: (params: { format: 'csv' | 'excel'; type: string; date?: string; startDate?: string; endDate?: string; month?: string; year?: string; locationId?: number }) => {
-    const query = new URLSearchParams(params as any).toString();
-    return `${BACKEND_URL}/api/reports/export?${query}`;
+  /** Download the export through the API so the login token is sent along, then save it */
+  downloadExport: async (params: ReportExportParams): Promise<void> => {
+    let res;
+    try {
+      res = await api.get('/reports/export', { params, responseType: 'blob' });
+    } catch (err: any) {
+      // With responseType 'blob' the JSON error body arrives as a Blob
+      const body = err.response?.data;
+      if (body instanceof Blob) {
+        const message = await body
+          .text()
+          .then((text) => JSON.parse(text).error)
+          .catch(() => null);
+        if (message) throw new Error(message);
+      }
+      throw err;
+    }
+
+    const disposition: string = res.headers['content-disposition'] || '';
+    const filename =
+      /filename="?([^";]+)"?/.exec(disposition)?.[1] ||
+      `WheelWash_${params.type}_report.${params.format === 'excel' ? 'xlsx' : 'csv'}`;
+    const url = URL.createObjectURL(res.data);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   },
 };
 
