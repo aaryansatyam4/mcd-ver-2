@@ -1,5 +1,5 @@
 import { Response } from 'express';
-import { ReportService } from '../services/reportService.js';
+import { ReportRangeError, ReportService, parsePassagePageOptions } from '../services/reportService.js';
 import { getKolkataDateString } from '../utils/dateUtils.js';
 import type { AuthenticatedRequest } from '../middleware/auth.js';
 
@@ -14,7 +14,7 @@ export class ReportController {
         ? parseInt(String(req.query.locationId), 10)
         : undefined;
 
-      const report = ReportService.getDailyReport(dateStr, locationId);
+      const report = ReportService.getDailyReport(dateStr, locationId, parsePassagePageOptions(req.query));
       res.json(report);
     } catch (err: any) {
       res.status(500).json({ error: err.message || 'Failed to generate daily report.' });
@@ -32,10 +32,10 @@ export class ReportController {
         ? parseInt(String(req.query.locationId), 10)
         : undefined;
 
-      const report = ReportService.getWeeklyReport(startDate, endDate, locationId);
+      const report = ReportService.getWeeklyReport(startDate, endDate, locationId, parsePassagePageOptions(req.query));
       res.json(report);
     } catch (err: any) {
-      res.status(500).json({ error: err.message || 'Failed to generate weekly report.' });
+      res.status(err instanceof ReportRangeError ? 400 : 500).json({ error: err.message || 'Failed to generate weekly report.' });
     }
   }
 
@@ -49,7 +49,7 @@ export class ReportController {
         ? parseInt(String(req.query.locationId), 10)
         : undefined;
 
-      const report = ReportService.getMonthlyReport(month, locationId);
+      const report = ReportService.getMonthlyReport(month, locationId, parsePassagePageOptions(req.query));
       res.json(report);
     } catch (err: any) {
       res.status(500).json({ error: err.message || 'Failed to generate monthly report.' });
@@ -66,7 +66,7 @@ export class ReportController {
         ? parseInt(String(req.query.locationId), 10)
         : undefined;
 
-      const report = ReportService.getYearlyReport(year, locationId);
+      const report = ReportService.getYearlyReport(year, locationId, parsePassagePageOptions(req.query));
       res.json(report);
     } catch (err: any) {
       res.status(500).json({ error: err.message || 'Failed to generate yearly report.' });
@@ -117,7 +117,7 @@ export class ReportController {
       res.setHeader('Content-Disposition', `attachment; filename="${filename}.csv"`);
       res.send(csvContent);
     } catch (err: any) {
-      res.status(500).json({ error: err.message || 'Failed to export report.' });
+      res.status(err instanceof ReportRangeError ? 400 : 500).json({ error: err.message || 'Failed to export report.' });
     }
   }
 }

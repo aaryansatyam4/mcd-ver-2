@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   BarChart3,
   Download,
@@ -12,6 +12,11 @@ import {
   Truck,
   CheckCircle2,
   ShieldCheck,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
+  AlertTriangle,
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -23,19 +28,60 @@ import {
   Tooltip,
   Legend,
 } from 'recharts';
-import { reportService, dashboardService } from '../services/api.js';
+import { reportService, dashboardService, type PassagePageParams } from '../services/api.js';
 import { useAuth } from '../contexts/AuthContext.js';
+
+type ReportType = 'daily' | 'weekly' | 'monthly' | 'yearly';
+
+// Reports are kept in India time, so "today" must be the date in Kolkata, not in UTC
+const IST_DATE = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' });
+const todayIST = () => IST_DATE.format(new Date());
+const addDays = (date: string, days: number) => {
+  const d = new Date(`${date}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+};
+
+const PAGE_SIZES = [25, 50, 100, 250];
+const SERIES_COLORS = ['#3B82F6', '#10B981', '#F59E0B', '#8B5CF6', '#EF4444', '#06B6D4'];
+
+interface PassagePagination {
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+}
+
+/** Page numbers to show: always the first and last, and the pages around the current one */
+function pageNumbers(current: number, total: number): Array<number | 'gap'> {
+  const pages = new Set([1, total, current - 1, current, current + 1].filter((p) => p >= 1 && p <= total));
+  const sorted = [...pages].sort((a, b) => a - b);
+  const out: Array<number | 'gap'> = [];
+  sorted.forEach((p, i) => {
+    if (i > 0 && p - sorted[i - 1] > 1) out.push('gap');
+    out.push(p);
+  });
+  return out;
+}
 
 export const ReportsPage: React.FC = () => {
   const { user, isOperator } = useAuth();
-  const [reportType, setReportType] = useState<'daily' | 'weekly' | 'monthly' | 'yearly'>('daily');
-  const [dateFilter, setDateFilter] = useState<string>('today');
-  const [customStart, setCustomStart] = useState<string>(new Date().toISOString().split('T')[0]);
-  const [customEnd, setCustomEnd] = useState<string>(new Date().toISOString().split('T')[0]);
+  const today = todayIST();
+  const [reportType, setReportType] = useState<ReportType>('daily');
+  const [day, setDay] = useState<string>(today);
+  const [rangeStart, setRangeStart] = useState<string>(addDays(today, -6));
+  const [rangeEnd, setRangeEnd] = useState<string>(today);
+  const [month, setMonth] = useState<string>(today.slice(0, 7));
+  const [year, setYear] = useState<string>(today.slice(0, 4));
   const [selectedLocation, setSelectedLocation] = useState<string>('all');
+  const [paging, setPaging] = useState<PassagePageParams>({ page: 1, pageSize: 50, sort: 'newest' });
   const [reportData, setReportData] = useState<any>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [exporting, setExporting] = useState<'csv' | 'excel' | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
   const [locations, setLocations] = useState<any[]>([]);
+  const latestRequestRef = useRef(0);
 
   // Load locations for filter dropdown
   useEffect(() => {
@@ -47,59 +93,91 @@ export const ReportsPage: React.FC = () => {
     });
   }, [isOperator, user]);
 
-  // Fetch report data
+  /** Change a filter and go back to the first page of passages */
+  const withFirstPage = <T,>(setter: (value: T) => void) => (value: T) => {
+    setter(value);
+    setPaging((p) => ({ ...p, page: 1 }));
+  };
+  const changeReportType = withFirstPage(setReportType);
+  const changeDay = withFirstPage(setDay);
+  const changeRangeStart = withFirstPage(setRangeStart);
+  const changeRangeEnd = withFirstPage(setRangeEnd);
+  const changeMonth = withFirstPage(setMonth);
+  const changeYear = withFirstPage(setYear);
+  const changeLocation = withFirstPage(setSelectedLocation);
+
+  const locationId = selectedLocation !== 'all' ? Number(selectedLocation) : undefined;
+
+  // Fetch report data; only the newest request may update the page
   const fetchReport = async () => {
+    const requestId = ++latestRequestRef.current;
     try {
       setIsLoading(true);
-      const locId = selectedLocation !== 'all' ? Number(selectedLocation) : undefined;
+      setLoadError(null);
 
       let data: any;
       if (reportType === 'daily') {
-        const dateStr = dateFilter === 'yesterday'
-          ? (() => {
-              const d = new Date();
-              d.setDate(d.getDate() - 1);
-              return d.toISOString().split('T')[0];
-            })()
-          : customStart;
-        data = await reportService.getDaily(dateStr, locId);
+        data = await reportService.getDaily(day, locationId, paging);
       } else if (reportType === 'weekly') {
-        data = await reportService.getWeekly(customStart, customEnd, locId);
+        data = await reportService.getWeekly(rangeStart, rangeEnd, locationId, paging);
       } else if (reportType === 'monthly') {
-        const ym = customStart.slice(0, 7); // YYYY-MM
-        data = await reportService.getMonthly(ym, locId);
-      } else if (reportType === 'yearly') {
-        const y = customStart.slice(0, 4); // YYYY
-        data = await reportService.getYearly(y, locId);
+        data = await reportService.getMonthly(month, locationId, paging);
+      } else {
+        data = await reportService.getYearly(year, locationId, paging);
       }
 
-      setReportData(data);
-    } catch (err) {
+      if (requestId === latestRequestRef.current) setReportData(data);
+    } catch (err: any) {
       console.error('Error fetching report:', err);
+      if (requestId === latestRequestRef.current) {
+        setLoadError(err.response?.data?.error || 'Could not load the report. Check the connection and try again.');
+      }
     } finally {
-      setIsLoading(false);
+      if (requestId === latestRequestRef.current) setIsLoading(false);
     }
   };
 
   useEffect(() => {
     fetchReport();
-  }, [reportType, dateFilter, customStart, customEnd, selectedLocation]);
+  }, [reportType, day, rangeStart, rangeEnd, month, year, selectedLocation, paging]);
 
-  // Export handlers
-  const handleExport = (format: 'csv' | 'excel') => {
-    const locId = selectedLocation !== 'all' ? Number(selectedLocation) : undefined;
-    const url = reportService.downloadExport({
-      format,
-      type: reportType,
-      date: customStart,
-      startDate: customStart,
-      endDate: customEnd,
-      month: customStart.slice(0, 7),
-      year: customStart.slice(0, 4),
-      locationId: locId,
-    });
-    window.open(url, '_blank');
+  // Export handlers: downloaded through the API so the login token goes along
+  const handleExport = async (format: 'csv' | 'excel') => {
+    setExporting(format);
+    setExportError(null);
+    try {
+      await reportService.downloadExport({
+        format,
+        type: reportType,
+        ...(reportType === 'daily' && { date: day }),
+        ...(reportType === 'weekly' && { startDate: rangeStart, endDate: rangeEnd }),
+        ...(reportType === 'monthly' && { month }),
+        ...(reportType === 'yearly' && { year }),
+        ...(locationId !== undefined && { locationId }),
+      });
+    } catch (err: any) {
+      setExportError(err.message || 'Export failed. Try again.');
+    } finally {
+      setExporting(null);
+    }
   };
+
+  const yearOptions = Array.from({ length: 6 }, (_, i) => String(Number(today.slice(0, 4)) - i));
+  const pagination: PassagePagination | undefined = reportData?.passagesPagination;
+  const passageTotal = pagination?.total ?? reportData?.vehiclePassages?.length ?? 0;
+  const locationRows: any[] = reportData ? reportData.locations || reportData.locationTotals || [] : [];
+  const periodTotal = locationRows.reduce((sum, l) => sum + (l.total || 0), 0);
+  const chartSeries = locationRows.map((l, i) => ({
+    key: String(l.locationName).toLowerCase(),
+    name: String(l.locationName).charAt(0) + String(l.locationName).slice(1).toLowerCase(),
+    color: SERIES_COLORS[i % SERIES_COLORS.length],
+  }));
+
+  const pill = (active: boolean) =>
+    `px-2.5 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${
+      active ? 'bg-blue-50 border-blue-300 text-blue-700' : 'bg-white border-slate-300 text-slate-600 hover:bg-slate-50'
+    }`;
+  const inputClass = 'text-xs rounded-lg border-slate-300 border px-2.5 py-1.5 bg-white font-mono focus:outline-none';
 
   return (
     <div className="space-y-6">
@@ -121,20 +199,29 @@ export const ReportsPage: React.FC = () => {
         <div className="flex items-center gap-2">
           <button
             onClick={() => handleExport('csv')}
-            className="px-3.5 py-2 text-xs font-bold text-slate-700 bg-white hover:bg-slate-50 border border-slate-300 rounded-lg shadow-2xs flex items-center gap-1.5 transition-colors"
+            disabled={exporting !== null}
+            className="px-3.5 py-2 text-xs font-bold text-slate-700 bg-white hover:bg-slate-50 border border-slate-300 rounded-lg shadow-2xs flex items-center gap-1.5 transition-colors disabled:opacity-60"
           >
-            <FileText className="w-4 h-4 text-slate-500" />
+            {exporting === 'csv' ? <RefreshCw className="w-4 h-4 text-slate-500 animate-spin" /> : <FileText className="w-4 h-4 text-slate-500" />}
             Export CSV
           </button>
           <button
             onClick={() => handleExport('excel')}
-            className="px-3.5 py-2 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg shadow-2xs flex items-center gap-1.5 transition-colors"
+            disabled={exporting !== null}
+            className="px-3.5 py-2 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg shadow-2xs flex items-center gap-1.5 transition-colors disabled:opacity-60"
           >
-            <FileSpreadsheet className="w-4 h-4 text-emerald-300" />
+            {exporting === 'excel' ? <RefreshCw className="w-4 h-4 text-emerald-300 animate-spin" /> : <FileSpreadsheet className="w-4 h-4 text-emerald-300" />}
             Export Excel
           </button>
         </div>
       </div>
+
+      {exportError && (
+        <div className="p-3 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4" />
+          Export failed: {exportError}
+        </div>
+      )}
 
       {/* Filter Toolbar */}
       <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm flex flex-wrap items-center justify-between gap-4">
@@ -143,7 +230,7 @@ export const ReportsPage: React.FC = () => {
           {(['daily', 'weekly', 'monthly', 'yearly'] as const).map((t) => (
             <button
               key={t}
-              onClick={() => setReportType(t)}
+              onClick={() => changeReportType(t)}
               className={`px-3 py-1.5 text-xs font-bold rounded-md capitalize transition-colors ${
                 reportType === t
                   ? 'bg-white text-slate-900 shadow-xs'
@@ -155,64 +242,54 @@ export const ReportsPage: React.FC = () => {
           ))}
         </div>
 
-        {/* Date and Location Filters */}
-        <div className="flex flex-wrap items-center gap-3">
-          {/* Quick Date Presets */}
-          <select
-            value={dateFilter}
-            onChange={(e) => {
-              const val = e.target.value;
-              setDateFilter(val);
-              const now = new Date();
-              if (val === 'today') {
-                setCustomStart(now.toISOString().split('T')[0]);
-                setCustomEnd(now.toISOString().split('T')[0]);
-              } else if (val === 'yesterday') {
-                const y = new Date(now);
-                y.setDate(y.getDate() - 1);
-                const yStr = y.toISOString().split('T')[0];
-                setCustomStart(yStr);
-                setCustomEnd(yStr);
-              } else if (val === 'last7days') {
-                const p = new Date(now);
-                p.setDate(p.getDate() - 6);
-                setCustomStart(p.toISOString().split('T')[0]);
-                setCustomEnd(now.toISOString().split('T')[0]);
-              }
-            }}
-            className="text-xs rounded-lg border-slate-300 border px-3 py-1.5 bg-slate-50 font-medium focus:outline-none"
-          >
-            <option value="today">Today</option>
-            <option value="yesterday">Yesterday</option>
-            <option value="last7days">Last 7 Days</option>
-            <option value="custom">Custom Date Range</option>
-          </select>
-
-          {/* Date Picker Input */}
-          <input
-            type="date"
-            value={customStart}
-            onChange={(e) => setCustomStart(e.target.value)}
-            className="text-xs rounded-lg border-slate-300 border px-2.5 py-1.5 bg-white font-mono focus:outline-none"
-          />
+        {/* Period and Location Filters */}
+        <div className="flex flex-wrap items-center gap-2">
+          <Calendar className="w-4 h-4 text-slate-400" />
+          {reportType === 'daily' && (
+            <>
+              <button className={pill(day === today)} onClick={() => changeDay(today)}>Today</button>
+              <button className={pill(day === addDays(today, -1))} onClick={() => changeDay(addDays(today, -1))}>Yesterday</button>
+              <input type="date" value={day} max={today} onChange={(e) => e.target.value && changeDay(e.target.value)} className={inputClass} />
+            </>
+          )}
 
           {reportType === 'weekly' && (
             <>
+              <button
+                className={pill(rangeStart === addDays(today, -6) && rangeEnd === today)}
+                onClick={() => {
+                  changeRangeStart(addDays(today, -6));
+                  changeRangeEnd(today);
+                }}
+              >
+                Last 7 Days
+              </button>
+              <input type="date" value={rangeStart} max={rangeEnd} onChange={(e) => e.target.value && changeRangeStart(e.target.value)} className={inputClass} />
               <span className="text-xs text-slate-400">to</span>
-              <input
-                type="date"
-                value={customEnd}
-                onChange={(e) => setCustomEnd(e.target.value)}
-                className="text-xs rounded-lg border-slate-300 border px-2.5 py-1.5 bg-white font-mono focus:outline-none"
-              />
+              <input type="date" value={rangeEnd} min={rangeStart} max={today} onChange={(e) => e.target.value && changeRangeEnd(e.target.value)} className={inputClass} />
             </>
+          )}
+
+          {reportType === 'monthly' && (
+            <>
+              <button className={pill(month === today.slice(0, 7))} onClick={() => changeMonth(today.slice(0, 7))}>This Month</button>
+              <input type="month" value={month} max={today.slice(0, 7)} onChange={(e) => e.target.value && changeMonth(e.target.value)} className={inputClass} />
+            </>
+          )}
+
+          {reportType === 'yearly' && (
+            <select value={year} onChange={(e) => changeYear(e.target.value)} className={inputClass}>
+              {yearOptions.map((y) => (
+                <option key={y} value={y}>{y}</option>
+              ))}
+            </select>
           )}
 
           {/* Location Selector (Disabled for Operator) */}
           <select
             value={selectedLocation}
             disabled={isOperator}
-            onChange={(e) => setSelectedLocation(e.target.value)}
+            onChange={(e) => changeLocation(e.target.value)}
             className="text-xs rounded-lg border-slate-300 border px-3 py-1.5 bg-slate-50 font-medium focus:outline-none disabled:opacity-60"
           >
             {!isOperator && <option value="all">All Locations (Combined)</option>}
@@ -225,12 +302,20 @@ export const ReportsPage: React.FC = () => {
 
           <button
             onClick={fetchReport}
+            title="Refresh"
             className="p-1.5 text-slate-600 hover:text-slate-900 bg-slate-100 rounded-lg hover:bg-slate-200 transition-colors"
           >
             <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
           </button>
         </div>
       </div>
+
+      {loadError && (
+        <div className="p-3 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4" />
+          {loadError}
+        </div>
+      )}
 
       {/* Summary KPI Cards */}
       {reportData && (
@@ -299,9 +384,9 @@ export const ReportsPage: React.FC = () => {
                   <YAxis tickLine={false} tick={{ fontSize: 11, fill: '#64748B' }} />
                   <Tooltip contentStyle={{ backgroundColor: '#0F172A', color: '#fff', borderRadius: '8px' }} />
                   <Legend iconType="circle" wrapperStyle={{ paddingTop: '10px', fontSize: '12px' }} />
-                  <Bar dataKey="ghazipur" name="Ghazipur" fill="#3B82F6" stackId="a" />
-                  <Bar dataKey="okhla" name="Okhla" fill="#10B981" stackId="a" />
-                  <Bar dataKey="bhalaswa" name="Bhalaswa" fill="#F59E0B" stackId="a" />
+                  {chartSeries.map((series) => (
+                    <Bar key={series.key} dataKey={series.key} name={series.name} fill={series.color} stackId="a" />
+                  ))}
                 </BarChart>
               ) : (
                 <BarChart data={reportData.monthlyBreakdown} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
@@ -310,9 +395,9 @@ export const ReportsPage: React.FC = () => {
                   <YAxis tickLine={false} tick={{ fontSize: 11, fill: '#64748B' }} />
                   <Tooltip contentStyle={{ backgroundColor: '#0F172A', color: '#fff', borderRadius: '8px' }} />
                   <Legend iconType="circle" wrapperStyle={{ paddingTop: '10px', fontSize: '12px' }} />
-                  <Bar dataKey="ghazipur" name="Ghazipur" fill="#3B82F6" stackId="a" />
-                  <Bar dataKey="okhla" name="Okhla" fill="#10B981" stackId="a" />
-                  <Bar dataKey="bhalaswa" name="Bhalaswa" fill="#F59E0B" stackId="a" />
+                  {chartSeries.map((series) => (
+                    <Bar key={series.key} dataKey={series.key} name={series.name} fill={series.color} stackId="a" />
+                  ))}
                 </BarChart>
               )}
             </ResponsiveContainer>
@@ -334,13 +419,31 @@ export const ReportsPage: React.FC = () => {
             <thead className="bg-slate-50">
               <tr>
                 <th className="px-5 py-3 text-left font-bold text-slate-600 uppercase">Location</th>
+                {reportType === 'daily' && (
+                  <>
+                    <th className="px-5 py-3 text-right font-bold text-slate-600 uppercase">Camera Count</th>
+                    <th className="px-5 py-3 text-right font-bold text-slate-600 uppercase">Manual Correction</th>
+                  </>
+                )}
+                <th className="px-5 py-3 text-right font-bold text-slate-600 uppercase">Share</th>
                 <th className="px-5 py-3 text-right font-bold text-slate-600 uppercase">Verified Camera Passages</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 font-mono">
-              {(reportData.locations || reportData.locationTotals || []).map((loc: any) => (
+              {locationRows.map((loc: any) => (
                 <tr key={loc.locationId} className="hover:bg-slate-50">
                   <td className="px-5 py-3 text-slate-800 font-sans font-bold">{loc.locationName}</td>
+                  {reportType === 'daily' && (
+                    <>
+                      <td className="px-5 py-3 text-right text-slate-700">{loc.automaticCount ?? '-'}</td>
+                      <td className={`px-5 py-3 text-right ${loc.manualAdjustment ? 'text-amber-700 font-bold' : 'text-slate-400'}`}>
+                        {loc.manualAdjustment > 0 ? `+${loc.manualAdjustment}` : loc.manualAdjustment ?? '-'}
+                      </td>
+                    </>
+                  )}
+                  <td className="px-5 py-3 text-right text-slate-500">
+                    {periodTotal > 0 ? `${Math.round((loc.total / periodTotal) * 100)}%` : '-'}
+                  </td>
                   <td className="px-5 py-3 text-right text-slate-900 font-black text-sm">{loc.total}</td>
                 </tr>
               ))}
@@ -364,7 +467,7 @@ export const ReportsPage: React.FC = () => {
             </div>
             <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 text-xs font-bold self-start sm:self-auto font-mono">
               <Truck className="w-3.5 h-3.5" />
-              <span>{reportData.vehiclePassages?.length || 0} Verified Crossings</span>
+              <span>{passageTotal.toLocaleString()} Verified Crossings</span>
             </div>
           </div>
 
@@ -439,8 +542,104 @@ export const ReportsPage: React.FC = () => {
               </tbody>
             </table>
           </div>
+
+          {pagination && pagination.total > 0 && (
+            <PassagePager
+              pagination={pagination}
+              sort={paging.sort}
+              isLoading={isLoading}
+              onPage={(page) => setPaging((p) => ({ ...p, page }))}
+              onPageSize={(pageSize) => setPaging((p) => ({ ...p, pageSize, page: 1 }))}
+              onSort={(sort) => setPaging((p) => ({ ...p, sort, page: 1 }))}
+            />
+          )}
         </div>
       )}
+    </div>
+  );
+};
+
+/** Footer under the passage log: range shown, rows per page, sort order and page buttons */
+const PassagePager: React.FC<{
+  pagination: PassagePagination;
+  sort: 'newest' | 'oldest';
+  isLoading: boolean;
+  onPage: (page: number) => void;
+  onPageSize: (pageSize: number) => void;
+  onSort: (sort: 'newest' | 'oldest') => void;
+}> = ({ pagination, sort, isLoading, onPage, onPageSize, onSort }) => {
+  const { page, pageSize, total, totalPages } = pagination;
+  const first = (page - 1) * pageSize + 1;
+  const last = Math.min(page * pageSize, total);
+  const button = (disabled: boolean) =>
+    `min-w-[2rem] h-8 px-2 rounded-lg border text-xs font-semibold flex items-center justify-center transition-colors ${
+      disabled ? 'border-slate-200 text-slate-300 cursor-not-allowed' : 'border-slate-300 text-slate-700 hover:bg-slate-50'
+    }`;
+
+  return (
+    <div className="px-4 py-3 border-t border-slate-200 bg-slate-50/60 flex flex-col lg:flex-row lg:items-center justify-between gap-3 text-xs">
+      <div className="flex flex-wrap items-center gap-3 text-slate-600">
+        <span>
+          Showing <strong className="font-mono text-slate-900">{first.toLocaleString()}–{last.toLocaleString()}</strong> of{' '}
+          <strong className="font-mono text-slate-900">{total.toLocaleString()}</strong> passages
+        </span>
+        <label className="flex items-center gap-1.5">
+          Rows
+          <select
+            value={pageSize}
+            onChange={(e) => onPageSize(Number(e.target.value))}
+            className="rounded-lg border border-slate-300 px-2 py-1 bg-white font-mono focus:outline-none"
+          >
+            {PAGE_SIZES.map((size) => (
+              <option key={size} value={size}>{size}</option>
+            ))}
+          </select>
+        </label>
+        <label className="flex items-center gap-1.5">
+          Order
+          <select
+            value={sort}
+            onChange={(e) => onSort(e.target.value as 'newest' | 'oldest')}
+            className="rounded-lg border border-slate-300 px-2 py-1 bg-white focus:outline-none"
+          >
+            <option value="newest">Newest first</option>
+            <option value="oldest">Oldest first</option>
+          </select>
+        </label>
+      </div>
+
+      <nav className={`flex items-center gap-1 ${isLoading ? 'opacity-60' : ''}`} aria-label="Passage log pages">
+        <button className={button(page === 1)} disabled={page === 1} onClick={() => onPage(1)} title="First page">
+          <ChevronsLeft className="w-4 h-4" />
+        </button>
+        <button className={button(page === 1)} disabled={page === 1} onClick={() => onPage(page - 1)} title="Previous page">
+          <ChevronLeft className="w-4 h-4" />
+        </button>
+        {pageNumbers(page, totalPages).map((p, i) =>
+          p === 'gap' ? (
+            <span key={`gap-${i}`} className="px-1 text-slate-400">…</span>
+          ) : (
+            <button
+              key={p}
+              onClick={() => onPage(p)}
+              aria-current={p === page ? 'page' : undefined}
+              className={
+                p === page
+                  ? 'min-w-[2rem] h-8 px-2 rounded-lg bg-blue-600 text-white text-xs font-bold font-mono'
+                  : `${button(false)} font-mono`
+              }
+            >
+              {p}
+            </button>
+          )
+        )}
+        <button className={button(page === totalPages)} disabled={page === totalPages} onClick={() => onPage(page + 1)} title="Next page">
+          <ChevronRight className="w-4 h-4" />
+        </button>
+        <button className={button(page === totalPages)} disabled={page === totalPages} onClick={() => onPage(totalPages)} title="Last page">
+          <ChevronsRight className="w-4 h-4" />
+        </button>
+      </nav>
     </div>
   );
 };

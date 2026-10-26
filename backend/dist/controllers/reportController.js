@@ -1,4 +1,4 @@
-import { ReportService } from '../services/reportService.js';
+import { ReportRangeError, ReportService, parsePassagePageOptions } from '../services/reportService.js';
 import { getKolkataDateString } from '../utils/dateUtils.js';
 export class ReportController {
     static async getDaily(req, res) {
@@ -10,7 +10,7 @@ export class ReportController {
                 : req.query.locationId
                     ? parseInt(String(req.query.locationId), 10)
                     : undefined;
-            const report = ReportService.getDailyReport(dateStr, locationId);
+            const report = ReportService.getDailyReport(dateStr, locationId, parsePassagePageOptions(req.query));
             res.json(report);
         }
         catch (err) {
@@ -27,11 +27,11 @@ export class ReportController {
                 : req.query.locationId
                     ? parseInt(String(req.query.locationId), 10)
                     : undefined;
-            const report = ReportService.getWeeklyReport(startDate, endDate, locationId);
+            const report = ReportService.getWeeklyReport(startDate, endDate, locationId, parsePassagePageOptions(req.query));
             res.json(report);
         }
         catch (err) {
-            res.status(500).json({ error: err.message || 'Failed to generate weekly report.' });
+            res.status(err instanceof ReportRangeError ? 400 : 500).json({ error: err.message || 'Failed to generate weekly report.' });
         }
     }
     static async getMonthly(req, res) {
@@ -43,7 +43,7 @@ export class ReportController {
                 : req.query.locationId
                     ? parseInt(String(req.query.locationId), 10)
                     : undefined;
-            const report = ReportService.getMonthlyReport(month, locationId);
+            const report = ReportService.getMonthlyReport(month, locationId, parsePassagePageOptions(req.query));
             res.json(report);
         }
         catch (err) {
@@ -59,7 +59,7 @@ export class ReportController {
                 : req.query.locationId
                     ? parseInt(String(req.query.locationId), 10)
                     : undefined;
-            const report = ReportService.getYearlyReport(year, locationId);
+            const report = ReportService.getYearlyReport(year, locationId, parsePassagePageOptions(req.query));
             res.json(report);
         }
         catch (err) {
@@ -109,7 +109,7 @@ export class ReportController {
             res.send(csvContent);
         }
         catch (err) {
-            res.status(500).json({ error: err.message || 'Failed to export report.' });
+            res.status(err instanceof ReportRangeError ? 400 : 500).json({ error: err.message || 'Failed to export report.' });
         }
     }
 }
