@@ -133,6 +133,34 @@ On the first start the backend copies the existing data into the sheet. After th
 
 ---
 
+## 📨 Telegram Daily Truck Count
+
+Every day at 23:55 (India time) the backend sends a Telegram message with the day's truck count:
+
+```
+🚛 WheelWash – 26 Oct 2026
+
+Total trucks today: 130
+
+GHAZIPUR: 44
+OKHLA: 43
+BHALASWA: 43
+```
+
+Setup (one time):
+1. In Telegram, open **@BotFather**, send `/newbot`, pick a name, and copy the **token** it gives you.
+2. Open your new bot and press **Start** (or add the bot to the group that should get the message, and send any message in the group).
+3. Find the chat id: open `https://api.telegram.org/bot<TOKEN>/getUpdates` in a browser and copy the number after `"chat":{"id":` (group ids start with `-`). If you skip this, set only the token and restart: the backend log lists the chats that messaged the bot.
+4. On Render > wheelwash-backend > Environment, set:
+   - `TELEGRAM_BOT_TOKEN` = the token from step 1
+   - `TELEGRAM_CHAT_ID` = the chat id (several ids separated by commas)
+   - `TELEGRAM_REPORT_TIME` = optional, `HH:MM` in India time (default `23:55`)
+5. Save and redeploy. The bot sends "✅ WheelWash is connected" once, then the count every day.
+
+Each message sent is recorded in the audit log, so a restart never sends the same day twice. If the server was down at report time, the missed message is still sent if it comes back before 06:00.
+
+> On Render's **free plan** the backend goes to sleep after 15 minutes with no visitors, and a sleeping server cannot send the message. Keep it awake with a free uptime monitor (e.g. UptimeRobot pinging `/api/health` every 5 minutes), or use a paid instance.
+
 ## 📊 Local Excel Storage (`backend/public/database.xlsx`)
 
 Without `GOOGLE_SCRIPT_URL`, records are stored in Microsoft Excel format in `backend/public/database.xlsx` (with the Google Sheet connected, this file is kept as a local cache):

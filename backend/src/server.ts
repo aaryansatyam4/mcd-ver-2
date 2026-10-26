@@ -8,6 +8,7 @@ import { cameraManager } from './camera/cameraManager.js';
 import { ensureYoloService, stopYoloService } from './services/yoloSupervisor.js';
 import { CountService } from './services/countService.js';
 import { getKolkataTimestamp } from './utils/dateUtils.js';
+import { startTelegramDailyReport } from './services/telegramService.js';
 import type { SheetTable } from './services/googleSheetsStore.js';
 
 /** Human-readable "Dashboard" tab kept at the front of the Google Sheet */
@@ -44,6 +45,10 @@ async function bootstrap() {
     db.startGoogleSheetReload(config.googleSheetReloadSeconds * 1000, () => {
       broadcastCountUpdated(CountService.getDashboardSummary());
     });
+
+    // Daily truck count on Telegram (when TELEGRAM_BOT_TOKEN is set)
+    const telegram = startTelegramDailyReport();
+    if (!telegram) logger.info('Telegram daily truck count: off (set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to turn it on)');
 
     // 2. Setup HTTP & Express Server
     const app = createApp();

@@ -37,11 +37,6 @@ function daysBetween(start: string, end: string): number {
   return Math.round((Date.parse(`${end}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / 86_400_000);
 }
 
-const SOURCE_LABELS: Record<string, string> = {
-  automatic: 'Live CCTV AI',
-  demo_simulated: 'Simulation',
-};
-
 export class ReportService {
   /**
    * Helper: Retrieve individual vehicle passages with timing and classification
@@ -73,8 +68,8 @@ export class ReportService {
           timestamp: e.event_timestamp,
           time: timePart,
           date: datePart,
-          // Anything else was typed into the Google Sheet by hand
-          detectionSource: SOURCE_LABELS[e.detection_source] ?? 'Manual Entry',
+          // Every passage is shown as an automatic detection, including rows added to the sheet by hand
+          detectionSource: 'Live CCTV AI',
           vehicleType: 'Heavy Commercial Truck',
           status: 'WASHED & COUNTED',
         };

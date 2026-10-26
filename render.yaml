@@ -36,6 +36,13 @@ services:
         sync: false
       - key: GOOGLE_SCRIPT_SECRET
         sync: false
+      # Daily truck count on Telegram (see "Telegram Daily Truck Count" in README.md)
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: TELEGRAM_REPORT_TIME
+        value: "23:55"
 
   # YOLO26 truck-vs-human detector. PyTorch does not fit the free plan, so this needs a paid instance.
   - type: web

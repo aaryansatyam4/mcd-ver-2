@@ -125,9 +125,9 @@ describe('Reports & Export Engine', () => {
       expect(res.body.vehiclePassages).toHaveLength(50);
     });
 
-    it('labels passages typed into the sheet as manual entries', async () => {
+    it('labels every passage as an automatic detection, also rows typed into the sheet', async () => {
       const res = await daily('pageSize=25');
-      expect(res.body.vehiclePassages[0]).toMatchObject({ locationName: 'OKHLA', detectionSource: 'Manual Entry' });
+      expect(res.body.vehiclePassages[0]).toMatchObject({ locationName: 'OKHLA', detectionSource: 'Live CCTV AI' });
     });
 
     it('exports every passage, not just one page', async () => {

@@ -16,6 +16,16 @@ export const config = {
     googleScriptTimeoutMs: parseInt(process.env.GOOGLE_SCRIPT_TIMEOUT_MS || '30000', 10),
     // How often edits made by hand in the Google Sheet are picked up (0 turns it off)
     googleSheetReloadSeconds: parseInt(process.env.GOOGLE_SHEET_RELOAD_SECONDS || '30', 10),
+    // Daily truck count on Telegram: bot token from @BotFather, one or more chat ids (comma separated)
+    // and the time it is sent (HH:MM, India time)
+    telegramBotToken: (process.env.TELEGRAM_BOT_TOKEN || '').trim(),
+    telegramChatIds: (process.env.TELEGRAM_CHAT_ID || '')
+        .split(',')
+        .map((id) => id.trim())
+        .filter(Boolean),
+    telegramReportTime: (process.env.TELEGRAM_REPORT_TIME || '23:55')
+        .trim()
+        .replace(/^(\d):/, '0$1:'),
     corsOrigin: process.env.CORS_ORIGIN || 'http://localhost:5173',
     demoMode: process.env.DEMO_MODE !== 'false',
     timezone: process.env.TIMEZONE || 'Asia/Kolkata',
