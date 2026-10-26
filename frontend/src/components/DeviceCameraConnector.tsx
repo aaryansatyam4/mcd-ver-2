@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Camera, Bluetooth, Video, Play, Square, RefreshCw, X, Radio, CheckCircle, Smartphone, Cpu } from 'lucide-react';
+import { Camera, Bluetooth, Video, Play, Square, RefreshCw, X, Radio, CheckCircle, Smartphone, Cpu, AlertTriangle } from 'lucide-react';
 import { useSocket } from '../contexts/SocketContext.js';
 import { loadYoloModel, type AiBackend, type YoloModel, type YoloResult } from '../ai/yoloBrowser.js';
 
@@ -8,6 +8,45 @@ type AiState =
   | { status: 'loading'; progress: number | null }
   | { status: 'ready'; backend: AiBackend; inferenceMs: number | null }
   | { status: 'unavailable' };
+
+// Why the live picture is not coming through. USB webcams drop out when Windows suspends the port,
+// the cable is loose or another app takes the camera; the browser then shows a black picture.
+type CameraIssue = 'disconnected' | 'stalled' | 'black';
+
+const CAMERA_ISSUES: Record<CameraIssue, { title: string; hint: string }> = {
+  disconnected: {
+    title: 'Camera disconnected. Reconnecting…',
+    hint: 'Check the USB cable and plug the camera straight into the PC (no hub or extension).',
+  },
+  stalled: {
+    title: 'Camera stopped sending video. Restarting it…',
+    hint: 'Close any other app or tab that uses the camera (Windows Camera, Teams, WhatsApp).',
+  },
+  black: {
+    title: 'Camera is sending a black picture.',
+    hint: 'Check the lens cover, the lighting and the USB cable. The camera is restarted automatically.',
+  },
+};
+
+const RECONNECT_DELAY_MS = 3000;
+const STALLED_RESTART_MS = 5000; // no frames from the camera for this long -> restart it
+const BLACK_RESTART_MS = 10000; // black picture for this long -> restart the camera
+const BLACK_RESTART_GAP_MS = 60000; // at most one black-picture restart a minute (e.g. a dark night)
+const BLACK_CHECK_MS = 1000;
+
+/** True when every pixel is close to black (a real scene, even at night, has some light in it) */
+function isBlackFrame(source: HTMLCanvasElement, probe: HTMLCanvasElement): boolean {
+  probe.width = 32;
+  probe.height = 18;
+  const ctx = probe.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return false;
+  ctx.drawImage(source, 0, 0, probe.width, probe.height);
+  const pixels = ctx.getImageData(0, 0, probe.width, probe.height).data;
+  for (let i = 0; i < pixels.length; i += 4) {
+    if (pixels[i] > 20 || pixels[i + 1] > 20 || pixels[i + 2] > 20) return false;
+  }
+  return true;
+}
 
 interface DeviceCameraConnectorProps {
   isOpen: boolean;
@@ -29,6 +68,7 @@ export const DeviceCameraConnector: React.FC<DeviceCameraConnectorProps> = ({
   const [streamError, setStreamError] = useState<string | null>(null);
   const [fpsCount, setFpsCount] = useState<number>(0);
   const [aiState, setAiState] = useState<AiState>({ status: 'idle' });
+  const [cameraIssue, setCameraIssue] = useState<CameraIssue | null>(null);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -40,6 +80,17 @@ export const DeviceCameraConnector: React.FC<DeviceCameraConnectorProps> = ({
   // Newest on-device result not yet sent; each result rides along with exactly one frame
   const pendingDetectionsRef = useRef<YoloResult | null>(null);
   const lastInferenceUiUpdateRef = useRef<number>(0);
+
+  // Camera health: the device being streamed, so it can be reopened after it drops out
+  const activeDeviceRef = useRef<{ deviceId: string; label: string } | null>(null);
+  const cameraIssueRef = useRef<CameraIssue | null>(null);
+  const restartingRef = useRef<boolean>(false);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const stalledTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const blackSinceRef = useRef<number | null>(null);
+  const lastBlackCheckRef = useRef<number>(0);
+  const lastBlackRestartRef = useRef<number>(0);
+  const probeCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   // Enumerate cameras (webcams, USB cams, Bluetooth cams, phone/continuity cams)
   const enumerateCameras = async () => {
@@ -67,6 +118,130 @@ export const DeviceCameraConnector: React.FC<DeviceCameraConnectorProps> = ({
     }
   }, [isOpen]);
 
+  // No reconnect attempts after the dialog is gone
+  useEffect(() => {
+    return () => {
+      isStreamingRef.current = false;
+      clearCameraTimers();
+    };
+  }, []);
+
+  const showCameraIssue = (issue: CameraIssue | null) => {
+    cameraIssueRef.current = issue;
+    setCameraIssue(issue);
+  };
+
+  const clearCameraTimers = () => {
+    if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+    if (stalledTimerRef.current) clearTimeout(stalledTimerRef.current);
+    reconnectTimerRef.current = null;
+    stalledTimerRef.current = null;
+  };
+
+  /** Open the selected camera and show it in the preview. Throws when the camera cannot be opened. */
+  const openCamera = async (deviceId: string): Promise<MediaStream> => {
+    const constraints: MediaStreamConstraints = {
+      video: deviceId ? { deviceId: { exact: deviceId }, width: 640, height: 360 } : true,
+      audio: false,
+    };
+
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    mediaStreamRef.current = stream;
+
+    const track = stream.getVideoTracks()[0];
+    if (track) {
+      activeDeviceRef.current = { deviceId: track.getSettings().deviceId || deviceId, label: track.label };
+      // The camera was unplugged, suspended by Windows or taken by another app
+      track.addEventListener('ended', () => {
+        if (mediaStreamRef.current === stream) restartCamera('disconnected');
+      });
+      // No frames arriving; give the camera a moment before restarting it
+      track.addEventListener('mute', () => {
+        if (mediaStreamRef.current !== stream || stalledTimerRef.current) return;
+        stalledTimerRef.current = setTimeout(() => {
+          stalledTimerRef.current = null;
+          if (mediaStreamRef.current === stream && track.muted) restartCamera('stalled');
+        }, STALLED_RESTART_MS);
+      });
+      track.addEventListener('unmute', () => {
+        if (stalledTimerRef.current) clearTimeout(stalledTimerRef.current);
+        stalledTimerRef.current = null;
+      });
+    }
+
+    if (videoRef.current) {
+      videoRef.current.srcObject = stream;
+      await videoRef.current.play();
+    }
+    return stream;
+  };
+
+  /** Release the current camera and open it again, retrying every few seconds until it is back */
+  const restartCamera = async (issue: CameraIssue) => {
+    if (!isStreamingRef.current || restartingRef.current) return;
+    restartingRef.current = true;
+    showCameraIssue(issue);
+    clearCameraTimers();
+    blackSinceRef.current = null;
+
+    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+    mediaStreamRef.current = null;
+
+    try {
+      const device = activeDeviceRef.current;
+      let stream: MediaStream;
+      try {
+        stream = await openCamera(device?.deviceId ?? selectedDeviceId);
+      } catch (err) {
+        // After a replug the camera can come back under a new id; find it again by name
+        const cameras = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput');
+        const same = device?.label ? cameras.find((d) => d.label === device.label) : undefined;
+        if (!same || same.deviceId === device?.deviceId) throw err;
+        stream = await openCamera(same.deviceId);
+        setSelectedDeviceId(same.deviceId);
+      }
+      // Streaming was stopped while the camera was reopening
+      if (!isStreamingRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        if (mediaStreamRef.current === stream) mediaStreamRef.current = null;
+        return;
+      }
+      // A black picture keeps its warning until the picture is back; the frame check clears it
+      if (issue !== 'black') showCameraIssue(null);
+    } catch (err) {
+      console.warn('Camera restart failed, trying again:', err);
+      showCameraIssue('disconnected');
+      if (isStreamingRef.current) {
+        reconnectTimerRef.current = setTimeout(() => {
+          reconnectTimerRef.current = null;
+          restartCamera('disconnected');
+        }, RECONNECT_DELAY_MS);
+      }
+    } finally {
+      restartingRef.current = false;
+    }
+  };
+
+  /** Called about once a second with the frame just captured: restart the camera if it stays black */
+  const checkForBlackPicture = (canvas: HTMLCanvasElement) => {
+    if (!probeCanvasRef.current) probeCanvasRef.current = document.createElement('canvas');
+    const now = Date.now();
+
+    if (!isBlackFrame(canvas, probeCanvasRef.current)) {
+      blackSinceRef.current = null;
+      if (cameraIssueRef.current === 'black') showCameraIssue(null);
+      return;
+    }
+
+    blackSinceRef.current ??= now;
+    if (now - blackSinceRef.current < BLACK_RESTART_MS) return;
+    if (cameraIssueRef.current !== 'black') showCameraIssue('black');
+    if (now - lastBlackRestartRef.current >= BLACK_RESTART_GAP_MS) {
+      lastBlackRestartRef.current = now;
+      restartCamera('black');
+    }
+  };
+
   // Server refuses frames from users who may not stream to this location
   useEffect(() => {
     if (!socket) return;
@@ -83,19 +258,11 @@ export const DeviceCameraConnector: React.FC<DeviceCameraConnectorProps> = ({
 
   const startStreaming = async () => {
     setStreamError(null);
+    showCameraIssue(null);
+    blackSinceRef.current = null;
+    lastBlackRestartRef.current = 0;
     try {
-      const constraints: MediaStreamConstraints = {
-        video: selectedDeviceId ? { deviceId: { exact: selectedDeviceId }, width: 640, height: 360 } : true,
-        audio: false,
-      };
-
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      mediaStreamRef.current = stream;
-
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-      }
+      await openCamera(selectedDeviceId);
 
       setIsStreaming(true);
       isStreamingRef.current = true;
@@ -116,10 +283,19 @@ export const DeviceCameraConnector: React.FC<DeviceCameraConnectorProps> = ({
         const canvas = canvasRef.current;
         const ctx = canvas.getContext('2d');
 
+        // Skip while the camera is being reopened or has no picture yet
+        if (restartingRef.current || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
+
         if (video.videoWidth > 0 && video.videoHeight > 0 && ctx) {
           canvas.width = 640;
           canvas.height = 360;
           ctx.drawImage(video, 0, 0, 640, 360);
+
+          const now = Date.now();
+          if (now - lastBlackCheckRef.current >= BLACK_CHECK_MS) {
+            lastBlackCheckRef.current = now;
+            checkForBlackPicture(canvas);
+          }
 
           const detections = pendingDetectionsRef.current;
           pendingDetectionsRef.current = null;
@@ -185,6 +361,11 @@ export const DeviceCameraConnector: React.FC<DeviceCameraConnectorProps> = ({
   };
 
   const stopStreaming = () => {
+    clearCameraTimers();
+    showCameraIssue(null);
+    blackSinceRef.current = null;
+    activeDeviceRef.current = null;
+
     if (streamIntervalRef.current) {
       clearInterval(streamIntervalRef.current);
       streamIntervalRef.current = null;
@@ -299,16 +480,34 @@ export const DeviceCameraConnector: React.FC<DeviceCameraConnectorProps> = ({
 
             {isStreaming && (
               <div className="absolute top-2.5 left-2.5 flex items-center gap-2">
-                <span className="flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-600 text-white text-[10px] font-mono font-bold">
-                  <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
-                  BEAMING TO {locationName}
-                </span>
+                {cameraIssue ? (
+                  <span className="flex items-center gap-1 px-2 py-0.5 rounded bg-amber-500 text-white text-[10px] font-mono font-bold">
+                    <AlertTriangle className="w-3 h-3" />
+                    {cameraIssue === 'black' ? 'NO PICTURE' : 'RECONNECTING'}
+                  </span>
+                ) : (
+                  <span className="flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-600 text-white text-[10px] font-mono font-bold">
+                    <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
+                    BEAMING TO {locationName}
+                  </span>
+                )}
                 <span className="px-2 py-0.5 rounded bg-black/70 text-white text-[10px] font-mono">
                   {fpsCount} frames synced
                 </span>
               </div>
             )}
           </div>
+
+          {/* Camera health */}
+          {isStreaming && cameraIssue && (
+            <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-900">
+              <div className="font-bold flex items-center gap-1.5 mb-0.5">
+                <AlertTriangle className="w-4 h-4 text-amber-600" />
+                {CAMERA_ISSUES[cameraIssue].title}
+              </div>
+              {CAMERA_ISSUES[cameraIssue].hint}
+            </div>
+          )}
 
           {/* On-device AI status */}
           {aiState.status === 'loading' && (
