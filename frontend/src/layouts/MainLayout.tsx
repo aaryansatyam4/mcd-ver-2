@@ -14,12 +14,10 @@ import {
   Truck,
   Clock,
   Shield,
-  FileSpreadsheet,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext.js';
 import { useSocket } from '../contexts/SocketContext.js';
 import { ChangePasswordModal } from '../components/ChangePasswordModal.js';
-import { BACKEND_URL, api } from '../services/api.js';
 
 export const MainLayout: React.FC = () => {
   const { user, logout, isAdmin } = useAuth();
@@ -28,15 +26,6 @@ export const MainLayout: React.FC = () => {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [currentTime, setCurrentTime] = useState('');
-  const [spreadsheetUrl, setSpreadsheetUrl] = useState<string | null>(null);
-
-  // When the backend stores data in a Google Sheet, link to it instead of the Excel file
-  useEffect(() => {
-    api
-      .get('/health')
-      .then((res) => setSpreadsheetUrl(res.data?.database?.spreadsheetUrl ?? null))
-      .catch(() => setSpreadsheetUrl(null));
-  }, []);
 
   // Live Asia/Kolkata clock
   useEffect(() => {
@@ -251,28 +240,6 @@ export const MainLayout: React.FC = () => {
                 <Shield className="w-3.5 h-3.5 text-blue-600" />
                 <span>3 SITES ACTIVE</span>
               </div>
-
-              {/* Direct database quick link: the Google Sheet when connected, otherwise the Excel file */}
-              {spreadsheetUrl ? (
-                <a
-                  href={spreadsheetUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="hidden md:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-50 text-emerald-800 border border-emerald-300 hover:bg-emerald-100 transition-colors shadow-xs"
-                >
-                  <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
-                  Google Sheet
-                </a>
-              ) : (
-                <a
-                  href={`${BACKEND_URL}/public/database.xlsx`}
-                  download="wheelwash_database.xlsx"
-                  className="hidden md:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-50 text-emerald-800 border border-emerald-300 hover:bg-emerald-100 transition-colors shadow-xs"
-                >
-                  <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
-                  Excel Database
-                </a>
-              )}
             </div>
           </header>
 
