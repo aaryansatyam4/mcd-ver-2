@@ -52,6 +52,19 @@ export const TABLE_COLUMNS = {
 export const TABLE_NAMES = Object.keys(TABLE_COLUMNS);
 // Rows in these tables are only ever added, never edited, so they can be synced by appending
 export const APPEND_ONLY_TABLES = ['vehicle_events', 'count_adjustments', 'audit_logs'];
+// Date / time columns. Reports match them as text ("2026-10-26 12:37:09" starts with "2026-10-26"),
+// so values typed by hand in the sheet are brought into that exact form.
+const DATE_COLUMNS = new Set(['event_timestamp', 'report_date', 'created_at', 'last_login']);
+const DATE_PATTERN = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?)?$/;
+/** "2026/10/26 9:05" -> "2026-10-26 09:05:00". Anything that is not a date is returned as is. */
+export function normalizeDateText(raw) {
+    const m = DATE_PATTERN.exec(raw);
+    if (!m)
+        return raw;
+    const pad = (v) => (v ?? '0').padStart(2, '0');
+    const date = `${m[1]}-${pad(m[2])}-${pad(m[3])}`;
+    return m[4] === undefined ? date : `${date} ${pad(m[4])}:${pad(m[5])}:${pad(m[6])}`;
+}
 export function tableHeaders(table) {
     return TABLE_COLUMNS[table].map((c) => c.name);
 }
@@ -68,7 +81,9 @@ export function fromSheetRow(table, headers, cells) {
     const record = {};
     for (const column of TABLE_COLUMNS[table]) {
         const index = headers.indexOf(column.name);
-        const raw = index === -1 ? '' : String(cells[index] ?? '').trim();
+        let raw = index === -1 ? '' : String(cells[index] ?? '').trim();
+        if (DATE_COLUMNS.has(column.name))
+            raw = normalizeDateText(raw);
         const empty = raw === '' || raw === 'null';
         switch (column.type) {
             case 'number':

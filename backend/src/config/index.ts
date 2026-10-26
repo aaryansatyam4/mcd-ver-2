@@ -17,6 +17,8 @@ export const config = {
   googleScriptUrl: (process.env.GOOGLE_SCRIPT_URL || '').trim(),
   googleScriptSecret: (process.env.GOOGLE_SCRIPT_SECRET || '').trim(),
   googleScriptTimeoutMs: parseInt(process.env.GOOGLE_SCRIPT_TIMEOUT_MS || '30000', 10),
+  // How often edits made by hand in the Google Sheet are picked up (0 turns it off)
+  googleSheetReloadSeconds: parseInt(process.env.GOOGLE_SHEET_RELOAD_SECONDS || '30', 10),
   corsOrigin: process.env.CORS_ORIGIN || 'http://localhost:5173',
   demoMode: process.env.DEMO_MODE !== 'false',
   timezone: process.env.TIMEZONE || 'Asia/Kolkata',

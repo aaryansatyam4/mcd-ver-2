@@ -89,6 +89,8 @@ export class GoogleSheetsSync {
     failures = 0;
     dashboardProvider = null;
     dashboardDue = false;
+    // Bumped on every local change, so a reload that raced with one can be thrown away
+    changeCounter = 0;
     lastSyncAt = null;
     lastError = null;
     constructor(client, getTables, debounceMs = 1500) {
@@ -106,6 +108,25 @@ export class GoogleSheetsSync {
         refresh();
         setInterval(refresh, refreshMs).unref();
     }
+    /** Rewrite the Dashboard tab soon, e.g. after the data was reloaded from the sheet */
+    refreshDashboard() {
+        if (!this.dashboardProvider)
+            return;
+        this.dashboardDue = true;
+        this.schedule();
+    }
+    get changeCount() {
+        return this.changeCounter;
+    }
+    /** True while local data changes are waiting for, or in the middle of, a push to the sheet */
+    hasUnsavedData() {
+        if (this.running)
+            return true;
+        const tables = this.getTables();
+        return (this.dirty.size > 0 ||
+            this.tabsToCreate.size > 0 ||
+            APPEND_ONLY_TABLES.some((name) => tables[name].length > (this.syncedCounts[name] ?? 0)));
+    }
     /** Record that the sheet already holds these tables exactly as they are in memory */
     markInSync(tables) {
         const current = this.getTables();
@@ -117,6 +138,7 @@ export class GoogleSheetsSync {
     }
     /** Record that the sheet is missing these tables, so they are uploaded in full */
     markMissing(tables) {
+        this.changeCounter++;
         for (const name of tables) {
             if (APPEND_ONLY_TABLES.includes(name)) {
                 this.syncedCounts[name] = 0;
@@ -129,6 +151,7 @@ export class GoogleSheetsSync {
         this.schedule();
     }
     markDirty(table) {
+        this.changeCounter++;
         // Append-only tables are detected by comparing row counts, so they only need a push scheduled
         if (!APPEND_ONLY_TABLES.includes(table))
             this.dirty.add(table);

@@ -6,7 +6,7 @@ import { config } from '../config/index.js';
 import { logger } from '../utils/logger.js';
 import { getKolkataTimestamp } from '../utils/dateUtils.js';
 import { GoogleSheetsClient, GoogleSheetsSync } from '../services/googleSheetsStore.js';
-import { APPEND_ONLY_TABLES, TABLE_NAMES, type TableName, type Tables } from './schema.js';
+import { APPEND_ONLY_TABLES, TABLE_NAMES, toSheetRow, type TableName, type Tables } from './schema.js';
 import type {
   User,
   Location,
@@ -16,11 +16,12 @@ import type {
   AuditLog,
 } from '../models/types.js';
 
-class ExcelDatabase {
+export class ExcelDatabase {
   private filePath: string;
   private isSaving = false;
   private saveTimeout: NodeJS.Timeout | null = null;
   private sheetsError: string | null = null;
+  private isReloading = false;
 
   // Set when GOOGLE_SCRIPT_URL is configured and the sheet could be reached at startup
   public sheets: GoogleSheetsSync | null = null;
@@ -37,7 +38,7 @@ class ExcelDatabase {
     this.filePath = filePath;
   }
 
-  public async init(): Promise<void> {
+  public async init(sheetsClient = GoogleSheetsClient.fromConfig()): Promise<void> {
     const dir = path.dirname(this.filePath);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
@@ -52,8 +53,7 @@ class ExcelDatabase {
       await this.saveToDisk();
     }
 
-    const client = GoogleSheetsClient.fromConfig();
-    if (client) await this.connectGoogleSheets(client);
+    if (sheetsClient) await this.connectGoogleSheets(sheetsClient);
   }
 
   /**
@@ -82,26 +82,81 @@ class ExcelDatabase {
 
     this.sheetsError = null;
     this.sheets = new GoogleSheetsSync(client, () => this.snapshot());
-
-    // A tab that exists in the sheet wins, even when empty. The exception is an empty
-    // locations/users/cameras tab, which would lock everyone out, so the local copy is uploaded.
-    const fromSheet = TABLE_NAMES.filter(
-      (name) => remote![name] !== undefined && (APPEND_ONLY_TABLES.includes(name) || remote![name]!.length > 0)
-    );
-    const missing = TABLE_NAMES.filter((name) => !fromSheet.includes(name));
-    for (const name of fromSheet) this.setTable(name, remote[name]!);
-
-    this.sheets.markInSync(fromSheet);
-    if (missing.length > 0) {
-      logger.info(`Uploading to Google Sheet (not there yet): ${missing.join(', ')}`);
-      this.sheets.markMissing(missing);
-      await this.sheets.flush().catch(() => undefined); // keeps retrying in the background on failure
-    }
+    await this.applySheetTables(remote);
 
     await this.saveToDisk();
     logger.info(
       `Google Sheet database connected: ${this.users.length} users, ${this.vehicleEvents.length} events, ${this.countAdjustments.length} adjustments`
     );
+  }
+
+  /**
+   * Replace the in-memory tables with the ones read from the sheet. Returns the tables whose
+   * contents changed.
+   */
+  private async applySheetTables(remote: Partial<Tables>): Promise<TableName[]> {
+    const sheets = this.sheets!;
+    const current = this.snapshot();
+
+    // A tab that exists in the sheet wins, even when empty. The exception is an empty
+    // locations/users/cameras tab, which would lock everyone out, so the local copy is uploaded.
+    const fromSheet = TABLE_NAMES.filter(
+      (name) => remote[name] !== undefined && (APPEND_ONLY_TABLES.includes(name) || remote[name]!.length > 0)
+    );
+    const missing = TABLE_NAMES.filter((name) => !fromSheet.includes(name));
+    const asCells = (name: TableName, rows: object[]) => JSON.stringify(rows.map((row) => toSheetRow(name, row)));
+    const changed = fromSheet.filter((name) => asCells(name, current[name]) !== asCells(name, remote[name]!));
+    for (const name of fromSheet) this.setTable(name, remote[name]!);
+
+    sheets.markInSync(fromSheet);
+    if (missing.length > 0) {
+      logger.info(`Uploading to Google Sheet (not there yet): ${missing.join(', ')}`);
+      sheets.markMissing(missing);
+      await sheets.flush().catch(() => undefined); // keeps retrying in the background on failure
+    }
+    return changed;
+  }
+
+  /**
+   * Pick up edits made by hand in the Google Sheet. Skipped while local changes are still being
+   * saved (the sheet would not have them yet), and thrown away if a local change happens while
+   * the sheet is being read. Returns the tables that changed.
+   */
+  public async reloadFromGoogleSheet(): Promise<TableName[]> {
+    const sheets = this.sheets;
+    if (!sheets || this.isReloading || sheets.hasUnsavedData()) return [];
+
+    this.isReloading = true;
+    try {
+      const changesBefore = sheets.changeCount;
+      const remote = await sheets.client.load();
+      if (sheets.changeCount !== changesBefore || sheets.hasUnsavedData()) return [];
+
+      const changed = await this.applySheetTables(remote);
+      if (changed.length > 0) {
+        logger.info(`[GOOGLE SHEETS] Reloaded edits made in the sheet: ${changed.join(', ')}`);
+        sheets.refreshDashboard();
+        await this.saveToDisk();
+      }
+      return changed;
+    } catch (err) {
+      logger.warn(`[GOOGLE SHEETS] Could not reload the sheet: ${(err as Error).message}`);
+      return [];
+    } finally {
+      this.isReloading = false;
+    }
+  }
+
+  /** Reload the sheet every `intervalMs`, calling `onChange` when something was edited there */
+  public startGoogleSheetReload(intervalMs: number, onChange: (tables: TableName[]) => void): void {
+    if (!this.sheets || intervalMs <= 0) return;
+    setInterval(() => {
+      this.reloadFromGoogleSheet()
+        .then((changed) => {
+          if (changed.length > 0) onChange(changed);
+        })
+        .catch(() => undefined);
+    }, intervalMs).unref();
   }
 
   private snapshot(): Tables {
