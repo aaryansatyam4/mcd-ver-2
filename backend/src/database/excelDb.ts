@@ -5,6 +5,8 @@ import bcrypt from 'bcryptjs';
 import { config } from '../config/index.js';
 import { logger } from '../utils/logger.js';
 import { getKolkataTimestamp } from '../utils/dateUtils.js';
+import { GoogleSheetsClient, GoogleSheetsSync } from '../services/googleSheetsStore.js';
+import { APPEND_ONLY_TABLES, TABLE_NAMES, type TableName, type Tables } from './schema.js';
 import type {
   User,
   Location,
@@ -18,6 +20,10 @@ class ExcelDatabase {
   private filePath: string;
   private isSaving = false;
   private saveTimeout: NodeJS.Timeout | null = null;
+  private sheetsError: string | null = null;
+
+  // Set when GOOGLE_SCRIPT_URL is configured and the sheet could be reached at startup
+  public sheets: GoogleSheetsSync | null = null;
 
   // In-memory data tables
   public users: User[] = [];
@@ -45,6 +51,108 @@ class ExcelDatabase {
       await this.seedInitialDatabase();
       await this.saveToDisk();
     }
+
+    const client = GoogleSheetsClient.fromConfig();
+    if (client) await this.connectGoogleSheets(client);
+  }
+
+  /**
+   * Make the Google Sheet the source of truth: every table found in the sheet replaces the
+   * local copy, and tables the sheet does not have yet are uploaded from the local copy.
+   */
+  private async connectGoogleSheets(client: GoogleSheetsClient): Promise<void> {
+    let remote: Partial<Tables> | null = null;
+    for (let attempt = 1; attempt <= 3 && !remote; attempt++) {
+      try {
+        logger.info('Loading database from Google Sheet...');
+        remote = await client.load();
+      } catch (err) {
+        this.sheetsError = (err as Error).message;
+        logger.warn(`Could not reach the Google Sheet (attempt ${attempt}/3): ${this.sheetsError}`);
+        if (attempt < 3) await new Promise((r) => setTimeout(r, 2000 * attempt));
+      }
+    }
+
+    if (!remote) {
+      logger.error(
+        'Google Sheet unreachable. Running on the local Excel file only; changes made until the next restart will NOT reach the sheet.'
+      );
+      return;
+    }
+
+    this.sheetsError = null;
+    this.sheets = new GoogleSheetsSync(client, () => this.snapshot());
+
+    // A tab that exists in the sheet wins, even when empty. The exception is an empty
+    // locations/users/cameras tab, which would lock everyone out, so the local copy is uploaded.
+    const fromSheet = TABLE_NAMES.filter(
+      (name) => remote![name] !== undefined && (APPEND_ONLY_TABLES.includes(name) || remote![name]!.length > 0)
+    );
+    const missing = TABLE_NAMES.filter((name) => !fromSheet.includes(name));
+    for (const name of fromSheet) this.setTable(name, remote[name]!);
+
+    this.sheets.markInSync(fromSheet);
+    if (missing.length > 0) {
+      logger.info(`Uploading to Google Sheet (not there yet): ${missing.join(', ')}`);
+      this.sheets.markMissing(missing);
+      await this.sheets.flush().catch(() => undefined); // keeps retrying in the background on failure
+    }
+
+    await this.saveToDisk();
+    logger.info(
+      `Google Sheet database connected: ${this.users.length} users, ${this.vehicleEvents.length} events, ${this.countAdjustments.length} adjustments`
+    );
+  }
+
+  private snapshot(): Tables {
+    return {
+      locations: this.locations,
+      users: this.users,
+      cameras: this.cameras,
+      vehicle_events: this.vehicleEvents,
+      count_adjustments: this.countAdjustments,
+      audit_logs: this.auditLogs,
+    };
+  }
+
+  private setTable<T extends TableName>(name: T, rows: Tables[T]): void {
+    switch (name) {
+      case 'locations':
+        this.locations = rows as Location[];
+        break;
+      case 'users':
+        this.users = rows as User[];
+        break;
+      case 'cameras':
+        this.cameras = rows as Camera[];
+        break;
+      case 'vehicle_events':
+        this.vehicleEvents = rows as VehicleEvent[];
+        break;
+      case 'count_adjustments':
+        this.countAdjustments = rows as CountAdjustment[];
+        break;
+      case 'audit_logs':
+        this.auditLogs = rows as AuditLog[];
+        break;
+    }
+  }
+
+  public getStorageStatus() {
+    return {
+      mode: this.sheets ? 'google-sheets' : 'excel',
+      googleSheetConfigured: Boolean(config.googleScriptUrl),
+      spreadsheetUrl: this.sheets?.client.spreadsheetUrl ?? null,
+      lastSyncAt: this.sheets?.lastSyncAt ?? null,
+      pendingChanges: this.sheets?.pendingChanges() ?? 0,
+      error: this.sheets?.lastError ?? this.sheetsError,
+    };
+  }
+
+  /** Write everything out (local file and Google Sheet), e.g. before shutting down */
+  public async flush(): Promise<void> {
+    await this.saveToDisk();
+    await this.sheets?.flush().catch(() => undefined);
   }
 
   /**
@@ -359,9 +467,10 @@ class ExcelDatabase {
   }
 
   /**
-   * Schedule a debounced flush to the Excel file
+   * Schedule a debounced flush to the Excel file, and to the Google Sheet when connected
    */
-  public queueSave(): void {
+  public queueSave(table: TableName): void {
+    this.sheets?.markDirty(table);
     if (this.saveTimeout) {
       clearTimeout(this.saveTimeout);
     }
@@ -532,7 +641,7 @@ class ExcelDatabase {
     const nextId = this.users.length > 0 ? Math.max(...this.users.map((u) => u.id)) + 1 : 1;
     const newUser: User = { ...user, id: nextId };
     this.users.push(newUser);
-    this.queueSave();
+    this.queueSave('users');
     return newUser;
   }
 
@@ -540,7 +649,7 @@ class ExcelDatabase {
     const index = this.users.findIndex((u) => u.id === id);
     if (index === -1) return undefined;
     this.users[index] = { ...this.users[index], ...updates };
-    this.queueSave();
+    this.queueSave('users');
     return this.users[index];
   }
 
@@ -561,7 +670,7 @@ class ExcelDatabase {
     const index = this.cameras.findIndex((c) => c.id === id);
     if (index === -1) return undefined;
     this.cameras[index] = { ...this.cameras[index], ...updates };
-    this.queueSave();
+    this.queueSave('cameras');
     return this.cameras[index];
   }
 
@@ -574,7 +683,7 @@ class ExcelDatabase {
     const nextId = this.vehicleEvents.length > 0 ? Math.max(...this.vehicleEvents.map((e) => e.id)) + 1 : 1;
     const newEvent: VehicleEvent = { ...event, id: nextId };
     this.vehicleEvents.push(newEvent);
-    this.queueSave();
+    this.queueSave('vehicle_events');
     return newEvent;
   }
 
@@ -606,7 +715,7 @@ class ExcelDatabase {
     const nextId = this.countAdjustments.length > 0 ? Math.max(...this.countAdjustments.map((a) => a.id)) + 1 : 1;
     const newAdj: CountAdjustment = { ...adj, id: nextId };
     this.countAdjustments.push(newAdj);
-    this.queueSave();
+    this.queueSave('count_adjustments');
     return newAdj;
   }
 
@@ -621,7 +730,7 @@ class ExcelDatabase {
     const nextId = this.auditLogs.length > 0 ? Math.max(...this.auditLogs.map((l) => l.id)) + 1 : 1;
     const newLog: AuditLog = { ...log, id: nextId };
     this.auditLogs.push(newLog);
-    this.queueSave();
+    this.queueSave('audit_logs');
     return newLog;
   }
 }

@@ -1,238 +1,178 @@
 /**
  * ==============================================================================
- * MCD WHEELWASH MONITOR — GOOGLE APPS SCRIPT SYNC INTEGRATION
+ * MCD WHEELWASH MONITOR — GOOGLE SHEET DATABASE (Google Apps Script)
  * ==============================================================================
+ *
+ * This script turns a Google Sheet into the WheelWash database. The backend loads
+ * all data from the sheet when it starts and writes every change back within a
+ * couple of seconds, so nothing is lost when the server restarts.
+ *
+ * SETUP (about 5 minutes, one time):
+ *   1. Create a new, empty Google Sheet (sheets.new).
+ *   2. Extensions > Apps Script. Delete the sample code and paste this whole file.
+ *   3. Optional but recommended: type a password between the quotes of SECRET_KEY
+ *      below, and use the same value for GOOGLE_SCRIPT_SECRET on the backend.
+ *   4. Click Save, then Deploy > New deployment > gear icon > "Web app".
+ *        Execute as:      Me
+ *        Who has access:  Anyone
+ *      Click Deploy and allow access when Google asks.
+ *   5. Copy the "Web app URL" (ends in /exec) and set it as GOOGLE_SCRIPT_URL
+ *      on the backend (Render > wheelwash-backend > Environment), then redeploy.
+ *
+ * On first start the backend fills the sheet with the existing data. Tabs:
+ *   Dashboard          today's truck count per site (refreshed on every change)
+ *   locations, users, cameras, vehicle_events, count_adjustments, audit_logs
+ *
+ * Edit data through the WheelWash app. If you edit the data tabs by hand,
+ * restart the backend afterwards so it reloads them.
+ *
+ * After changing this script, use Deploy > Manage deployments > Edit >
+ * Version: "New version" > Deploy, so the same URL keeps working.
  */
+
+var SECRET_KEY = '';
+
+var TABLES = ['locations', 'users', 'cameras', 'vehicle_events', 'count_adjustments', 'audit_logs'];
+var DASHBOARD_TAB = 'Dashboard';
+
+/** Opening the Web app URL in a browser shows whether the script is online */
+function doGet() {
+  return jsonResponse({
+    status: 'ok',
+    message: 'WheelWash Google Sheet database is online.',
+    spreadsheetUrl: SpreadsheetApp.getActiveSpreadsheet().getUrl(),
+  });
+}
 
 function doPost(e) {
   try {
-    if (!e || !e.postData || !e.postData.contents) {
-      return ContentService.createTextOutput(JSON.stringify({
-        status: "error",
-        message: "No post data received"
-      })).setMimeType(ContentService.MimeType.JSON);
+    var body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+    if (SECRET_KEY && body.secret !== SECRET_KEY) {
+      return jsonResponse({ status: 'error', message: 'Wrong secret. GOOGLE_SCRIPT_SECRET must match SECRET_KEY in the script.' });
     }
 
-    var payload = JSON.parse(e.postData.contents);
-    var action = payload.action;
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-
-    // 1. Test ping
-    if (action === "test_ping") {
-      getOrCreateSheet(ss, "Summary_Dashboard", [
-        "Location ID", "Location Name", "Today's Count", "Automatic Count", 
-        "Manual Adjustments", "Last Passage Time", "Status", "Last Updated (IST)"
-      ]);
-      return ContentService.createTextOutput(JSON.stringify({
-        status: "success",
-        message: "Connected to Google Sheet successfully!"
-      })).setMimeType(ContentService.MimeType.JSON);
+    // One request at a time, so two saves never write into the same rows
+    var lock = LockService.getScriptLock();
+    lock.waitLock(30000);
+    try {
+      var ss = SpreadsheetApp.getActiveSpreadsheet();
+      if (body.action === 'load') {
+        return jsonResponse({ status: 'ok', spreadsheetUrl: ss.getUrl(), tables: loadTables(ss) });
+      }
+      if (body.action === 'save') {
+        saveChanges(ss, body);
+        return jsonResponse({ status: 'ok', spreadsheetUrl: ss.getUrl() });
+      }
+      return jsonResponse({ status: 'error', message: 'Unknown action: ' + body.action });
+    } finally {
+      lock.releaseLock();
     }
-
-    // 2. Real-time Single Vehicle Passage Event
-    if (action === "vehicle_event") {
-      var event = payload.data || payload;
-      var sheet = getOrCreateSheet(ss, "Vehicle_Passages", [
-        "Passage ID", "Date & Time (IST)", "Location", "Camera ID", "Detection Source", "Logged At"
-      ]);
-      sheet.appendRow([
-        event.id || "",
-        event.timestamp || "",
-        event.locationName || "",
-        event.cameraId || "",
-        event.detectionSource || "automatic",
-        new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })
-      ]);
-      updateDashboardCounts(ss);
-    }
-
-    // 3. Real-time Count Adjustment Event
-    else if (action === "count_adjustment") {
-      var adj = payload.data || payload;
-      var sheet = getOrCreateSheet(ss, "Count_Adjustments", [
-        "Adjustment ID", "Date", "Location", "Adjustment (+/-)", "Previous Total", "Corrected Total", "Reason", "Modified By", "Timestamp"
-      ]);
-      sheet.appendRow([
-        adj.id || "",
-        adj.reportDate || "",
-        adj.locationName || "",
-        adj.adjustment || 0,
-        adj.previousTotal || 0,
-        adj.correctedTotal || 0,
-        adj.reason || "",
-        adj.modifiedBy || "",
-        adj.createdAt || new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })
-      ]);
-      updateDashboardCounts(ss);
-    }
-
-    // 4. Real-time Audit Log
-    else if (action === "audit_log") {
-      var log = payload.data || payload;
-      var sheet = getOrCreateSheet(ss, "Audit_Logs", [
-        "Log ID", "Timestamp (IST)", "User ID / Actor", "Action", "Details"
-      ]);
-      sheet.appendRow([
-        log.id || "",
-        log.createdAt || new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }),
-        log.userId ? "User #" + log.userId : "System",
-        log.actionName || log.action || "",
-        log.details || ""
-      ]);
-    }
-
-    // 5. Full Database Synchronization (Bulk push)
-    else if (action === "full_sync") {
-      var data = payload.data || payload;
-      syncFullDatabase(ss, data);
-    }
-
-    return ContentService.createTextOutput(JSON.stringify({
-      status: "success",
-      action: action,
-      timestamp: new Date().toISOString()
-    })).setMimeType(ContentService.MimeType.JSON);
-
   } catch (err) {
-    return ContentService.createTextOutput(JSON.stringify({
-      status: "error",
-      message: err.toString()
-    })).setMimeType(ContentService.MimeType.JSON);
+    return jsonResponse({ status: 'error', message: String(err) });
   }
 }
 
-function doGet(e) {
-  return ContentService.createTextOutput(JSON.stringify({
-    status: "online",
-    name: "WheelWash Monitor Google Apps Script Sync Endpoint",
-    time: new Date().toISOString()
-  })).setMimeType(ContentService.MimeType.JSON);
+function loadTables(ss) {
+  var tables = {};
+  TABLES.forEach(function (name) {
+    var sheet = ss.getSheetByName(name);
+    if (!sheet || sheet.getLastRow() === 0) return;
+    var values = sheet.getRange(1, 1, sheet.getLastRow(), sheet.getLastColumn()).getDisplayValues();
+    tables[name] = { headers: values[0], rows: values.slice(1) };
+  });
+  return tables;
 }
 
-function getOrCreateSheet(ss, name, headers) {
-  var sheet = ss.getSheetByName(name);
-  if (!sheet) {
-    sheet = ss.insertSheet(name);
-    if (headers && headers.length > 0) {
-      sheet.appendRow(headers);
-      formatHeaderRow(sheet, headers.length);
+function saveChanges(ss, body) {
+  var replace = body.replace || {};
+  var append = body.append || {};
+
+  Object.keys(replace).forEach(function (name) {
+    if (TABLES.indexOf(name) !== -1) replaceTable(ss, name, replace[name]);
+  });
+  Object.keys(append).forEach(function (name) {
+    if (TABLES.indexOf(name) !== -1) appendRows(ss, name, append[name]);
+  });
+  if (body.dashboard) {
+    var created = !ss.getSheetByName(DASHBOARD_TAB);
+    replaceTable(ss, DASHBOARD_TAB, body.dashboard);
+    if (created) {
+      ss.setActiveSheet(ss.getSheetByName(DASHBOARD_TAB));
+      ss.moveActiveSheet(1);
     }
   }
-  return sheet;
 }
 
-function formatHeaderRow(sheet, columnCount) {
-  var headerRange = sheet.getRange(1, 1, 1, columnCount);
-  headerRange.setBackground("#0F172A");
-  headerRange.setFontColor("#FFFFFF");
-  headerRange.setFontWeight("bold");
-  headerRange.setFontFamily("Segoe UI");
-  headerRange.setFontSize(10.5);
-  headerRange.setHorizontalAlignment("center");
-  headerRange.setVerticalAlignment("middle");
-  sheet.setRowHeight(1, 32);
+/** Overwrite a whole tab (used for users, cameras, locations and the dashboard) */
+function replaceTable(ss, name, table) {
+  var sheet = ss.getSheetByName(name) || ss.insertSheet(name);
+  sheet.clearContents();
+  writeRows(sheet, 1, [table.headers].concat(table.rows));
+  styleHeader(sheet, table.headers.length);
+}
+
+/** Add new rows at the bottom. Rows whose id is already in the tab are skipped, so a retried save never duplicates data. */
+function appendRows(ss, name, table) {
+  var sheet = ss.getSheetByName(name) || ss.insertSheet(name);
+  var lastRow = sheet.getLastRow();
+
+  if (lastRow === 0) {
+    writeRows(sheet, 1, [table.headers]);
+    styleHeader(sheet, table.headers.length);
+    lastRow = 1;
+  }
+
+  // Columns are matched by header name, so reordering columns in the sheet is fine
+  var sheetHeaders = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getDisplayValues()[0];
+  table.headers.forEach(function (header) {
+    if (sheetHeaders.indexOf(header) === -1) {
+      sheetHeaders.push(header);
+      writeRows(sheet, 1, [sheetHeaders]);
+      styleHeader(sheet, sheetHeaders.length);
+    }
+  });
+
+  var idColumn = sheetHeaders.indexOf('id') + 1;
+  var existing = {};
+  if (lastRow > 1) {
+    sheet.getRange(2, idColumn, lastRow - 1, 1).getDisplayValues().forEach(function (r) {
+      existing[r[0]] = true;
+    });
+  }
+
+  var idIndex = table.headers.indexOf('id');
+  var rows = table.rows
+    .filter(function (row) { return !existing[row[idIndex]]; })
+    .map(function (row) {
+      return sheetHeaders.map(function (header) {
+        var i = table.headers.indexOf(header);
+        return i === -1 ? '' : row[i];
+      });
+    });
+
+  if (rows.length > 0) writeRows(sheet, lastRow + 1, rows);
+}
+
+/** Store every value as plain text so Sheets never turns timestamps or ids into dates/numbers */
+function writeRows(sheet, startRow, rows) {
+  if (rows.length === 0) return;
+  var width = rows[0].length;
+  var values = rows.map(function (row) {
+    return row.map(function (value) {
+      var text = value === null || value === undefined ? '' : String(value);
+      return text.charAt(0) === '=' ? "'" + text : text; // never run text as a formula
+    });
+  });
+  var range = sheet.getRange(startRow, 1, values.length, width);
+  range.setNumberFormat('@');
+  range.setValues(values);
+}
+
+function styleHeader(sheet, width) {
+  sheet.getRange(1, 1, 1, width).setFontWeight('bold').setBackground('#0F172A').setFontColor('#FFFFFF');
   sheet.setFrozenRows(1);
 }
 
-function syncFullDatabase(ss, data) {
-  if (data.summary && data.summary.locations) {
-    var summarySheet = getOrCreateSheet(ss, "Summary_Dashboard", [
-      "Location ID", "Location Name", "Today's Count", "Automatic Count", 
-      "Manual Adjustments", "Last Passage Time", "Status", "Last Updated (IST)"
-    ]);
-    summarySheet.getRange(2, 1, Math.max(1, summarySheet.getLastRow()), 8).clearContent();
-    
-    var summaryRows = data.summary.locations.map(function(loc) {
-      return [
-        loc.locationId,
-        loc.locationName,
-        loc.todayCount || 0,
-        loc.automaticCount || 0,
-        loc.manualAdjustment || 0,
-        loc.lastDetectionTime || "None",
-        loc.cameraStatus || "online",
-        new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })
-      ];
-    });
-    if (summaryRows.length > 0) {
-      summarySheet.getRange(2, 1, summaryRows.length, 8).setValues(summaryRows);
-      summarySheet.getRange(2, 1, summaryRows.length, 8).setHorizontalAlignment("center");
-    }
-  }
-
-  if (data.events && Array.isArray(data.events)) {
-    var passagesSheet = getOrCreateSheet(ss, "Vehicle_Passages", [
-      "Passage ID", "Date & Time (IST)", "Location", "Camera ID", "Detection Source", "Logged At"
-    ]);
-    passagesSheet.getRange(2, 1, Math.max(1, passagesSheet.getLastRow()), 6).clearContent();
-
-    var passageRows = data.events.map(function(e) {
-      return [
-        e.id,
-        e.event_timestamp || e.timestamp,
-        e.locationName || ("Location " + e.location_id),
-        e.camera_id || 1,
-        e.detection_source || "automatic",
-        new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })
-      ];
-    });
-    if (passageRows.length > 0) {
-      passagesSheet.getRange(2, 1, passageRows.length, 6).setValues(passageRows);
-    }
-  }
-
-  if (data.adjustments && Array.isArray(data.adjustments)) {
-    var adjSheet = getOrCreateSheet(ss, "Count_Adjustments", [
-      "Adjustment ID", "Date", "Location", "Adjustment (+/-)", "Previous Total", "Corrected Total", "Reason", "Modified By", "Timestamp"
-    ]);
-    adjSheet.getRange(2, 1, Math.max(1, adjSheet.getLastRow()), 9).clearContent();
-
-    var adjRows = data.adjustments.map(function(a) {
-      return [
-        a.id,
-        a.report_date || a.reportDate,
-        a.locationName || ("Location " + a.location_id),
-        a.adjustment,
-        a.previous_total || a.previousTotal,
-        a.corrected_total || a.correctedTotal,
-        a.reason,
-        a.modified_by || a.modifiedBy,
-        a.created_at || a.createdAt
-      ];
-    });
-    if (adjRows.length > 0) {
-      adjSheet.getRange(2, 1, adjRows.length, 9).setValues(adjRows);
-    }
-  }
-
-  if (data.auditLogs && Array.isArray(data.auditLogs)) {
-    var auditSheet = getOrCreateSheet(ss, "Audit_Logs", [
-      "Log ID", "Timestamp (IST)", "User ID / Actor", "Action", "Details"
-    ]);
-    auditSheet.getRange(2, 1, Math.max(1, auditSheet.getLastRow()), 5).clearContent();
-
-    var auditRows = data.auditLogs.map(function(log) {
-      return [
-        log.id,
-        log.created_at,
-        log.user_id ? "User #" + log.user_id : "System",
-        log.action,
-        typeof log.details === "string" ? log.details : JSON.stringify(log.details)
-      ];
-    });
-    if (auditRows.length > 0) {
-      auditSheet.getRange(2, 1, auditRows.length, 5).setValues(auditRows);
-    }
-  }
-
-  var defaultSheet = ss.getSheetByName("Sheet1");
-  if (defaultSheet && ss.getSheets().length > 1) {
-    try { ss.deleteSheet(defaultSheet); } catch(e) {}
-  }
-}
-
-function updateDashboardCounts(ss) {
-  var summarySheet = ss.getSheetByName("Summary_Dashboard");
-  if (!summarySheet) return;
-  summarySheet.getRange("H2:H4").setValue(new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" }));
+function jsonResponse(data) {
+  return ContentService.createTextOutput(JSON.stringify(data)).setMimeType(ContentService.MimeType.JSON);
 }

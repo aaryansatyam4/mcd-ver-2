@@ -95,9 +95,47 @@ The virtual demo feed (Demo Control Bar) is simulated and keeps working without 
 
 ---
 
-## 📊 Database Engine: Excel Storage (`backend/public/database.xlsx`)
+## 📗 Google Sheet Database (recommended for Render)
 
-All records are stored directly in Microsoft Excel format in `backend/public/database.xlsx`:
+The backend can keep all its data in a Google Sheet. It loads everything from the sheet when it starts and writes each change back within about 2 seconds, so nothing is lost when Render restarts or redeploys the server (the free plan wipes the local disk each time).
+
+**One-time setup (about 5 minutes):**
+
+1. Create a new, empty Google Sheet ([sheets.new](https://sheets.new)).
+2. In the sheet: **Extensions → Apps Script**. Delete the sample code and paste the whole of [`google-apps-script.js`](google-apps-script.js).
+3. Optional but recommended: put a password between the quotes in `var SECRET_KEY = '';`.
+4. Click **Save**, then **Deploy → New deployment → ⚙ → Web app**:
+   - Execute as: **Me**
+   - Who has access: **Anyone**
+
+   Click **Deploy** and allow access when Google asks.
+5. Copy the **Web app URL** (it ends in `/exec`).
+6. On Render, open **wheelwash-backend → Environment** and add:
+   - `GOOGLE_SCRIPT_URL` = the Web app URL
+   - `GOOGLE_SCRIPT_SECRET` = the same password as `SECRET_KEY` (skip if you left it empty)
+
+   Save; Render redeploys. For local runs put the same two lines in `backend/.env`.
+
+On the first start the backend copies the existing data into the sheet. After that the sheet is the database:
+
+| Tab | Contents |
+|---|---|
+| `Dashboard` | Today's truck count per site and the total (refreshed on every change and every 5 minutes) |
+| `vehicle_events` | Every truck passage |
+| `count_adjustments` | Manual count corrections |
+| `audit_logs` | Audit trail |
+| `users`, `locations`, `cameras` | Accounts (hashed passwords), sites, camera settings |
+
+- Make changes through the app. If you edit the data tabs by hand, restart the backend so it reloads them.
+- If Google can't be reached, changes are kept in memory and retried automatically until they are saved.
+- `GET /api/health` shows `database.mode` (`google-sheets` or `excel`), the last sync time, pending changes and any error. When the sheet is connected, the **Google Sheet** button in the top bar opens it.
+- After editing the Apps Script, use **Deploy → Manage deployments → Edit → Version: New version → Deploy** so the URL stays the same.
+
+---
+
+## 📊 Local Excel Storage (`backend/public/database.xlsx`)
+
+Without `GOOGLE_SCRIPT_URL`, records are stored in Microsoft Excel format in `backend/public/database.xlsx` (with the Google Sheet connected, this file is kept as a local cache):
 
 - **Worksheets:**
   1. `users`: Account credentials, hashed passwords, roles, location IDs.

@@ -5,6 +5,7 @@ import fs from 'fs';
 import { config } from './config/index.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { isYoloAvailable } from './services/yoloDetector.js';
+import { db } from './database/excelDb.js';
 
 // Route imports
 import authRoutes from './routes/authRoutes.js';
@@ -36,7 +37,7 @@ export function createApp() {
       status: 'healthy',
       time: new Date().toISOString(),
       service: 'WheelWash Monitor API',
-      database: 'Excel Storage (backend/public/database.xlsx)',
+      database: db.getStorageStatus(),
       demoMode: config.demoMode,
       yolo: { url: config.yoloUrl, online: await isYoloAvailable() },
     });

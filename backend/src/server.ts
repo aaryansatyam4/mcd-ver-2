@@ -6,6 +6,30 @@ import { db } from './database/excelDb.js';
 import { initSocketServer } from './sockets/socketServer.js';
 import { cameraManager } from './camera/cameraManager.js';
 import { ensureYoloService, stopYoloService } from './services/yoloSupervisor.js';
+import { CountService } from './services/countService.js';
+import { getKolkataTimestamp } from './utils/dateUtils.js';
+import type { SheetTable } from './services/googleSheetsStore.js';
+
+/** Human-readable "Dashboard" tab kept at the front of the Google Sheet */
+function buildSheetDashboard(): SheetTable {
+  const summary = CountService.getDashboardSummary();
+  const updated = getKolkataTimestamp();
+  const rows = summary.locations.map((loc) => [
+    loc.locationName,
+    String(loc.todayCount),
+    String(loc.automaticCount),
+    String(loc.manualAdjustment),
+    loc.lastDetectionTime || '-',
+    loc.cameraStatus,
+    summary.date,
+    updated,
+  ]);
+  rows.push(['TOTAL', String(summary.totalTrucksToday), '', '', '', '', summary.date, updated]);
+  return {
+    headers: ['Location', 'Trucks Today', 'Automatic', 'Manual Adjustment', 'Last Truck Seen', 'Camera', 'Date', 'Updated (IST)'],
+    rows,
+  };
+}
 
 async function bootstrap() {
   try {
@@ -13,8 +37,9 @@ async function bootstrap() {
     logger.info('      WHEELWASH MONITOR - STARTING SERVER        ');
     logger.info('==================================================');
 
-    // 1. Initialize Excel Database
+    // 1. Initialize Database (Google Sheet when GOOGLE_SCRIPT_URL is set, otherwise the Excel file)
     await db.init();
+    db.sheets?.setDashboardProvider(buildSheetDashboard);
 
     // 2. Setup HTTP & Express Server
     const app = createApp();
@@ -33,7 +58,12 @@ async function bootstrap() {
     // 6. Start Listening
     server.listen(config.port, () => {
       logger.info(`WheelWash Monitor API Server running at http://localhost:${config.port}`);
-      logger.info(`Excel Database available at: ${config.excelDbPath}`);
+      const storage = db.getStorageStatus();
+      if (storage.mode === 'google-sheets') {
+        logger.info(`Database: Google Sheet ${storage.spreadsheetUrl ?? ''} (local cache: ${config.excelDbPath})`);
+      } else {
+        logger.info(`Database: Excel file at ${config.excelDbPath}`);
+      }
       logger.info(`Static download URL: http://localhost:${config.port}/public/database.xlsx`);
       logger.info(`Demo Mode: ${config.demoMode ? 'ENABLED' : 'DISABLED'}`);
       logger.info('Five seeded accounts ready:');
@@ -49,7 +79,7 @@ async function bootstrap() {
       logger.info(`Received ${signal}. Gracefully stopping WheelWash Monitor...`);
       cameraManager.shutdown();
       stopYoloService();
-      await db.saveToDisk();
+      await db.flush();
       server.close(() => {
         logger.info('HTTP server closed. Exiting process.');
         process.exit(0);
