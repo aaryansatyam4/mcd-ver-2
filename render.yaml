@@ -36,6 +36,11 @@ services:
         sync: false
       - key: GOOGLE_SCRIPT_SECRET
         sync: false
+      # Camera video sent to people watching (counting always uses every frame). Lower = less data.
+      - key: CAMERA_LIVE_FPS
+        value: "2"
+      - key: CAMERA_PREVIEW_SECONDS
+        value: "10"
       # Daily truck count on Telegram (see "Telegram Daily Truck Count" in README.md)
       - key: TELEGRAM_BOT_TOKEN
         sync: false

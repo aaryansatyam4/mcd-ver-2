@@ -8,8 +8,15 @@ import type { DashboardSummary } from '../types/index.js';
 
 export const LiveMonitoringPage: React.FC = () => {
   const { user, isOperator } = useAuth();
-  const { cameraFrames, latestSummary } = useSocket();
+  const { cameraFrames, latestSummary, watchCameras } = useSocket();
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
+
+  // Only ask the server for camera frames while this page is shown: live video for the cameras on this page
+  const watchedIds = summary?.locations.map((l) => l.locationId).join(',') ?? '';
+  useEffect(() => {
+    if (!watchedIds) return;
+    return watchCameras(watchedIds.split(',').map(Number), 'live');
+  }, [watchedIds, watchCameras]);
 
   const fetchSummary = async () => {
     try {

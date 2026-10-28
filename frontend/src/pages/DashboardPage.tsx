@@ -15,8 +15,15 @@ import type { DashboardSummary } from '../types/index.js';
 
 export const DashboardPage: React.FC = () => {
   const { user, isOperator } = useAuth();
-  const { cameraFrames, latestSummary } = useSocket();
+  const { cameraFrames, latestSummary, watchCameras } = useSocket();
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
+
+  // Only ask the server for camera frames while this page is shown: a picture every few seconds on the camera tiles
+  const watchedIds = summary?.locations.map((l) => l.locationId).join(',') ?? '';
+  useEffect(() => {
+    if (!watchedIds) return;
+    return watchCameras(watchedIds.split(',').map(Number), 'preview');
+  }, [watchedIds, watchCameras]);
   const [hourlyData, setHourlyData] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
 

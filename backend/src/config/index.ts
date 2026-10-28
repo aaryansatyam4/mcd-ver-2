@@ -29,6 +29,10 @@ export const config = {
   telegramReportTime: (process.env.TELEGRAM_REPORT_TIME || '23:55')
     .trim()
     .replace(/^(\d):/, '0$1:'),
+  // Camera frames sent to people watching (detection always uses every frame): frames per second
+  // on Live Monitoring, and seconds between pictures on the Dashboard tiles
+  cameraLiveFps: parseFloat(process.env.CAMERA_LIVE_FPS || '2'),
+  cameraPreviewSeconds: parseFloat(process.env.CAMERA_PREVIEW_SECONDS || '10'),
   corsOrigin: process.env.CORS_ORIGIN || 'http://localhost:5173',
   demoMode: process.env.DEMO_MODE !== 'false',
   timezone: process.env.TIMEZONE || 'Asia/Kolkata',
