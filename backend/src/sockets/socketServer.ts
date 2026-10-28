@@ -2,6 +2,7 @@ import { Server as SocketIOServer, Socket } from 'socket.io';
 import { Server as HttpServer } from 'http';
 import { verifyToken, type TokenPayload } from '../utils/jwtUtils.js';
 import { logger } from '../utils/logger.js';
+import { config } from '../config/index.js';
 import { db } from '../database/excelDb.js';
 import type { StreamFrame } from '../camera/types.js';
 import type { YoloResult, YoloDetection } from '../services/yoloDetector.js';
@@ -82,6 +83,22 @@ export function canIngestCamera(payload: TokenPayload | undefined, locationId: n
   return user.role === 'operator' && user.assigned_location_id === locationId;
 }
 
+/**
+ * Camera frames are the bulk of the traffic (Render bills outgoing data), so they only go to
+ * browsers that are showing a camera: 'live' viewers (Live Monitoring) get a few frames a second,
+ * 'preview' viewers (Dashboard tiles) one every few seconds. A browser that is streaming its own
+ * camera never gets that camera's frames back.
+ */
+export type CameraWatchMode = 'live' | 'preview';
+const WATCH_MODES: CameraWatchMode[] = ['live', 'preview'];
+const frameRoom = (mode: CameraWatchMode, locationId: number) => `frames:${mode}:${locationId}`;
+const frameIntervalMs = (mode: CameraWatchMode) =>
+  mode === 'live' ? Math.round(1000 / Math.max(0.1, config.cameraLiveFps)) : config.cameraPreviewSeconds * 1000;
+
+const lastFrameSentAt = new Map<string, number>(); // room -> time of last frame sent to it
+const latestFrame = new Map<number, StreamFrame>(); // locationId -> newest frame, for new viewers
+const streamingSocket = new Map<number, string>(); // locationId -> socket id of the device streaming it
+
 export function initSocketServer(httpServer: HttpServer, corsOrigin: string): SocketIOServer {
   io = new SocketIOServer(httpServer, {
     cors: {
@@ -131,6 +148,7 @@ export function initSocketServer(httpServer: HttpServer, corsOrigin: string): So
         return;
       }
 
+      streamingSocket.set(locationId, socket.id);
       const detections = data.detections === undefined ? null : parseDeviceDetections(data.detections);
       onDeviceFrameHandler?.(locationId, data.frameBase64, detections ?? undefined);
     });
@@ -139,6 +157,24 @@ export function initSocketServer(httpServer: HttpServer, corsOrigin: string): So
       const locationId = Number(data?.locationId);
       if (canIngestCamera(user, locationId) && onDeviceDisconnectHandler) {
         onDeviceDisconnectHandler(locationId);
+      }
+      if (streamingSocket.get(locationId) === socket.id) streamingSocket.delete(locationId);
+    });
+
+    // Which cameras this browser is showing right now; replaces what it watched before.
+    // An empty list (page without cameras, hidden tab, idle viewer) stops all frames.
+    socket.on('camera:watch', (data: { locationIds?: unknown; mode?: unknown }) => {
+      for (const room of socket.rooms) {
+        if (room.startsWith('frames:')) socket.leave(room);
+      }
+      if (!user) return;
+      const mode: CameraWatchMode = data?.mode === 'live' ? 'live' : 'preview';
+      const ids = Array.isArray(data?.locationIds) ? data.locationIds.map(Number).filter(Number.isInteger) : [];
+      for (const locationId of ids) {
+        socket.join(frameRoom(mode, locationId));
+        // Show the newest picture straight away instead of waiting for the next frame
+        const frame = latestFrame.get(locationId);
+        if (frame && streamingSocket.get(locationId) !== socket.id) socket.emit('camera:frame', frame);
       }
     });
 
@@ -151,6 +187,9 @@ export function initSocketServer(httpServer: HttpServer, corsOrigin: string): So
     });
 
     socket.on('disconnect', () => {
+      for (const [locationId, id] of streamingSocket) {
+        if (id === socket.id) streamingSocket.delete(locationId);
+      }
       logger.info(`Socket client disconnected: ${socket.id}`);
     });
   });
@@ -165,9 +204,19 @@ export function getIO(): SocketIOServer | null {
 /**
  * Broadcast real-time camera video frame
  */
-export function broadcastCameraFrame(frame: StreamFrame): void {
+export function broadcastCameraFrame(frame: StreamFrame, now = Date.now()): void {
   if (!io) return;
-  io.emit('camera:frame', frame);
+  latestFrame.set(frame.locationId, frame);
+
+  for (const mode of WATCH_MODES) {
+    const room = frameRoom(mode, frame.locationId);
+    if (!io.sockets.adapter.rooms.get(room)?.size) continue;
+    if (now - (lastFrameSentAt.get(room) ?? 0) < frameIntervalMs(mode)) continue;
+    lastFrameSentAt.set(room, now);
+
+    const device = streamingSocket.get(frame.locationId);
+    (device ? io.to(room).except(device) : io.to(room)).emit('camera:frame', frame);
+  }
 }
 
 /**
