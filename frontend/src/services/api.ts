@@ -52,6 +52,10 @@ export const authService = {
     const res = await api.post('/auth/logout');
     return res.data;
   },
+  refresh: async (): Promise<{ token: string }> => {
+    const res = await api.post('/auth/refresh');
+    return res.data;
+  },
   me: async (): Promise<{ user: UserSafe }> => {
     const res = await api.get('/auth/me');
     return res.data;

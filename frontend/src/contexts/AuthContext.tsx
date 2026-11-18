@@ -17,6 +17,10 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+// Swap the token for a fresh one this often while a page is open (tokens last 24 h), so a camera PC
+// that streams for days stays signed in and can still reconnect after the server restarts
+const TOKEN_REFRESH_MS = 60 * 60_000;
+
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<UserSafe | null>(null);
   const [token, setToken] = useState<string | null>(localStorage.getItem('ww_token'));
@@ -43,6 +47,25 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     fetchProfile();
   }, [token]);
+
+  const isLoggedIn = token !== null;
+  useEffect(() => {
+    if (!isLoggedIn) return;
+    const refresh = async () => {
+      try {
+        const data = await authService.refresh();
+        // Logged out while the request was running
+        if (!localStorage.getItem('ww_token')) return;
+        localStorage.setItem('ww_token', data.token);
+        setToken(data.token);
+      } catch {
+        // Server unreachable: keep the current token and try again next time
+      }
+    };
+    refresh();
+    const timer = setInterval(refresh, TOKEN_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [isLoggedIn]);
 
   const login = async (credentials: { username: string; password: string }) => {
     const data = await authService.login(credentials);

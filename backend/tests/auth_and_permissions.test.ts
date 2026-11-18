@@ -26,6 +26,19 @@ describe('Authentication & Role-Based Permissions', () => {
     adminToken = res.body.token;
   });
 
+  it('swaps a valid token for a fresh one, and refuses without a valid token', async () => {
+    const res = await request(app).post('/api/auth/refresh').set('Authorization', `Bearer ${adminToken}`);
+    expect(res.status).toBe(200);
+    expect(typeof res.body.token).toBe('string');
+
+    const me = await request(app).get('/api/auth/me').set('Authorization', `Bearer ${res.body.token}`);
+    expect(me.status).toBe(200);
+    expect(me.body.user.username).toBe('admin');
+
+    expect((await request(app).post('/api/auth/refresh')).status).toBe(401);
+    expect((await request(app).post('/api/auth/refresh').set('Authorization', 'Bearer not-a-token')).status).toBe(403);
+  });
+
   it('rejects invalid password', async () => {
     const res = await request(app)
       .post('/api/auth/login')

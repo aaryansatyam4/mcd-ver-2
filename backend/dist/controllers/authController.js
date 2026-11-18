@@ -60,6 +60,22 @@ export class AuthController {
             res.status(500).json({ error: err.message || 'Login failed.' });
         }
     }
+    /**
+     * Swap a still-valid token for a fresh one. Open pages call this regularly, so a camera PC that
+     * streams for days stays signed in, while a browser closed for longer than the token lifetime
+     * must log in again. The new token is built from the current user record (role, location), and
+     * authenticateToken has already refused disabled or deleted users.
+     */
+    static async refresh(req, res) {
+        const user = req.user;
+        const token = generateToken({
+            userId: user.id,
+            username: user.username,
+            role: user.role,
+            assignedLocationId: user.assigned_location_id,
+        });
+        res.json({ token });
+    }
     static async logout(req, res) {
         if (req.user) {
             AuditService.log(req.user.id, 'LOGOUT', `User ${req.user.username} logged out`);

@@ -34,6 +34,11 @@ const SocketContext = createContext<SocketContextType | undefined>(undefined);
 
 export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { token } = useAuth();
+  // Read on every (re)connect, so a reconnect uses the newest token without dropping the connection
+  // each time the token is refreshed
+  const tokenRef = useRef(token);
+  tokenRef.current = token;
+  const isLoggedIn = token !== null;
   const [socket, setSocket] = useState<Socket | null>(null);
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [cameraFrames, setCameraFrames] = useState<Record<number, StreamFrame>>({});
@@ -92,9 +97,11 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
     const socketInstance = io(socketUrl, {
       transports: ['websocket', 'polling'],
-      auth: { token: token ? `Bearer ${token}` : undefined },
-      reconnectionAttempts: 10,
+      auth: (cb) => cb({ token: tokenRef.current ? `Bearer ${tokenRef.current}` : undefined }),
+      // Never give up: a camera PC is left streaming unattended, and the backend can take a minute
+      // or more to come back after a restart or a free-plan wake-up
       reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
     });
 
     socketInstance.on('connect', () => {
@@ -136,7 +143,7 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     return () => {
       socketInstance.disconnect();
     };
-  }, [token]);
+  }, [isLoggedIn]);
 
   return (
     <SocketContext.Provider
