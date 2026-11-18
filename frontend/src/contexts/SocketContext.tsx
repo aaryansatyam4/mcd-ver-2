@@ -93,8 +93,10 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     const socketInstance = io(socketUrl, {
       transports: ['websocket', 'polling'],
       auth: { token: token ? `Bearer ${token}` : undefined },
-      reconnectionAttempts: 10,
+      // Never give up: a camera PC is left streaming unattended, and the backend can take a minute
+      // or more to come back after a restart or a free-plan wake-up
       reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
     });
 
     socketInstance.on('connect', () => {

@@ -61,7 +61,10 @@ export const DeviceCameraConnector: React.FC<DeviceCameraConnectorProps> = ({
   locationId,
   locationName,
 }) => {
-  const { socket } = useSocket();
+  const { socket, isConnected } = useSocket();
+  // The frame loop runs for hours; always send on the current connection, not the one it started with
+  const socketRef = useRef(socket);
+  socketRef.current = socket;
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
   const [isStreaming, setIsStreaming] = useState<boolean>(false);
@@ -277,6 +280,7 @@ export const DeviceCameraConnector: React.FC<DeviceCameraConnectorProps> = ({
       const intervalMs = Math.round(1000 / fps);
 
       streamIntervalRef.current = setInterval(() => {
+        const socket = socketRef.current;
         if (!videoRef.current || !canvasRef.current || !socket) return;
 
         const video = videoRef.current;
@@ -295,6 +299,13 @@ export const DeviceCameraConnector: React.FC<DeviceCameraConnectorProps> = ({
           if (now - lastBlackCheckRef.current >= BLACK_CHECK_MS) {
             lastBlackCheckRef.current = now;
             checkForBlackPicture(canvas);
+          }
+
+          // While the server is unreachable, drop frames instead of letting socket.io queue them in
+          // memory (hours of video); the connection retries on its own and frames resume with it
+          if (!socket.connected) {
+            pendingDetectionsRef.current = null;
+            return;
           }
 
           const detections = pendingDetectionsRef.current;
@@ -380,8 +391,8 @@ export const DeviceCameraConnector: React.FC<DeviceCameraConnectorProps> = ({
       videoRef.current.srcObject = null;
     }
 
-    if (socket && isStreamingRef.current) {
-      socket.emit('camera:disconnect_device', { locationId });
+    if (socketRef.current && isStreamingRef.current) {
+      socketRef.current.emit('camera:disconnect_device', { locationId });
     }
 
     isStreamingRef.current = false;
@@ -497,6 +508,17 @@ export const DeviceCameraConnector: React.FC<DeviceCameraConnectorProps> = ({
               </div>
             )}
           </div>
+
+          {/* Server connection */}
+          {isStreaming && !isConnected && (
+            <div className="p-3 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-800">
+              <div className="font-bold flex items-center gap-1.5 mb-0.5">
+                <AlertTriangle className="w-4 h-4 text-rose-600" />
+                Lost connection to the server. Reconnecting…
+              </div>
+              Keep this page open. Video and counting resume automatically once the server is back.
+            </div>
+          )}
 
           {/* Camera health */}
           {isStreaming && cameraIssue && (
