@@ -74,6 +74,23 @@ export class AuthController {
     }
   }
 
+  /**
+   * Swap a still-valid token for a fresh one. Open pages call this regularly, so a camera PC that
+   * streams for days stays signed in, while a browser closed for longer than the token lifetime
+   * must log in again. The new token is built from the current user record (role, location), and
+   * authenticateToken has already refused disabled or deleted users.
+   */
+  public static async refresh(req: AuthenticatedRequest, res: Response): Promise<void> {
+    const user = req.user!;
+    const token = generateToken({
+      userId: user.id,
+      username: user.username,
+      role: user.role,
+      assignedLocationId: user.assigned_location_id,
+    });
+    res.json({ token });
+  }
+
   public static async logout(req: AuthenticatedRequest, res: Response): Promise<void> {
     if (req.user) {
       AuditService.log(req.user.id, 'LOGOUT', `User ${req.user.username} logged out`);
